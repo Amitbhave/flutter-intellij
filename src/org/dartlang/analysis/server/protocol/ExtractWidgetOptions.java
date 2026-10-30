@@ -8,8 +8,6 @@
  */
 package org.dartlang.analysis.server.protocol;
 
-import java.util.List;
-
 import com.google.common.collect.Lists;
 import com.google.dart.server.utilities.general.ObjectUtilities;
 import com.google.gson.JsonArray;
@@ -19,6 +17,7 @@ import org.apache.commons.lang3.builder.HashCodeBuilder;
 
 import java.util.ArrayList;
 import java.util.Iterator;
+import java.util.List;
 
 /**
  * @coverage dart.server.generated.types
@@ -44,8 +43,7 @@ public class ExtractWidgetOptions extends RefactoringOptions {
 
   @Override
   public boolean equals(Object obj) {
-    if (obj instanceof ExtractWidgetOptions) {
-      ExtractWidgetOptions other = (ExtractWidgetOptions)obj;
+    if (obj instanceof ExtractWidgetOptions other) {
       return
         ObjectUtilities.equals(other.name, name);
     }
@@ -61,7 +59,7 @@ public class ExtractWidgetOptions extends RefactoringOptions {
     if (jsonArray == null) {
       return EMPTY_LIST;
     }
-    ArrayList<ExtractWidgetOptions> list = new ArrayList<ExtractWidgetOptions>(jsonArray.size());
+    ArrayList<ExtractWidgetOptions> list = new ArrayList<>(jsonArray.size());
     Iterator<JsonElement> iterator = jsonArray.iterator();
     while (iterator.hasNext()) {
       list.add(fromJson(iterator.next().getAsJsonObject()));

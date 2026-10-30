@@ -5,44 +5,57 @@
  */
 package io.flutter.settings;
 
+import com.google.common.annotations.VisibleForTesting;
 import com.intellij.ide.util.PropertiesComponent;
-import com.intellij.openapi.components.ServiceManager;
-import com.intellij.openapi.project.Project;
-import com.intellij.openapi.util.registry.Registry;
+import com.intellij.openapi.application.ApplicationManager;
 import com.intellij.util.EventDispatcher;
 import com.jetbrains.lang.dart.analyzer.DartClosingLabelManager;
-import io.flutter.analytics.Analytics;
-import io.flutter.sdk.FlutterSdk;
+import org.jetbrains.annotations.NotNull;
+import org.jetbrains.annotations.Nullable;
 
 import java.util.EventListener;
+import java.util.Objects;
 
 public class FlutterSettings {
   private static final String reloadOnSaveKey = "io.flutter.reloadOnSave";
   private static final String openInspectorOnAppLaunchKey = "io.flutter.openInspectorOnAppLaunch";
+  private static final String perserveLogsDuringHotReloadAndRestartKey = "io.flutter.persereLogsDuringHotReloadAndRestart";
   private static final String verboseLoggingKey = "io.flutter.verboseLogging";
   private static final String formatCodeOnSaveKey = "io.flutter.formatCodeOnSave";
   private static final String organizeImportsOnSaveKey = "io.flutter.organizeImportsOnSave";
-  private static final String showOnlyWidgetsKey = "io.flutter.showOnlyWidgets";
   private static final String syncAndroidLibrariesKey = "io.flutter.syncAndroidLibraries";
-  private static final String disableTrackWidgetCreationKey = "io.flutter.disableTrackWidgetCreation";
-  private static final String showStructuredErrors = "io.flutter.showStructuredErrors";
+  private static final String showStructuredErrorsKey = "io.flutter.showStructuredErrors";
+  private static final String includeAllStackTracesKey = "io.flutter.includeAllStackTraces";
   private static final String showBuildMethodGuidesKey = "io.flutter.editor.showBuildMethodGuides";
-  private static final String enableHotUiKey = "io.flutter.editor.enableHotUi";
+  private static final String enableJcefBrowserKey = "io.flutter.enableJcefBrowser";
+  private static final String fontPackagesKey = "io.flutter.fontPackages";
+  private static final String allowTestsInSourcesRootKey = "io.flutter.allowTestsInSources";
+  private static final String sdkVersionOutdatedWarningAcknowledgedKey = "io.flutter.sdkVersionOutdatedWarningAcknowledged";
+  private static final String androidStudioBotAcknowledgedKey = "io.flutter.androidStudioBotAcknowledgedKey";
+  private static final String enableFilePathLoggingKey = "io.flutter.enableFilePathLogging";
+
+  private static @Nullable FlutterSettings testInstance;
 
   /**
-   * Registry key to suggest all run configurations instead of just one.
-   * <p>
-   * Useful for {@link io.flutter.run.bazelTest.FlutterBazelTestConfigurationType} to show both watch and regular configurations
-   * in the left-hand gutter.
+   * This is only used for testing.
    */
-  private static final String suggestAllRunConfigurationsFromContextKey = "suggest.all.run.configurations.from.context";
-
-  public static FlutterSettings getInstance() {
-    return ServiceManager.getService(FlutterSettings.class);
+  @VisibleForTesting
+  public static void setInstance(@Nullable FlutterSettings instance) {
+    testInstance = instance;
   }
 
-  protected static PropertiesComponent getPropertiesComponent() {
-    return PropertiesComponent.getInstance();
+  public static @NotNull FlutterSettings getInstance() {
+    if (testInstance != null) {
+      return testInstance;
+    }
+
+    return Objects.requireNonNull(Objects.requireNonNull(ApplicationManager.getApplication()).getService(FlutterSettings.class));
+  }
+
+  protected static @NotNull PropertiesComponent getPropertiesComponent() {
+    var component = PropertiesComponent.getInstance();
+    assert component != null;
+    return component;
   }
 
   public interface Listener extends EventListener {
@@ -51,78 +64,12 @@ public class FlutterSettings {
 
   private final EventDispatcher<Listener> dispatcher = EventDispatcher.create(Listener.class);
 
-  public FlutterSettings() {
-  }
-
-  public void sendSettingsToAnalytics(Analytics analytics) {
-    final PropertiesComponent properties = getPropertiesComponent();
-
-    // Send data on the number of experimental features enabled by users.
-    analytics.sendEvent("settings", "ping");
-
-    if (isReloadOnSave()) {
-      analytics.sendEvent("settings", afterLastPeriod(reloadOnSaveKey));
-    }
-    if (isOpenInspectorOnAppLaunch()) {
-      analytics.sendEvent("settings", afterLastPeriod(openInspectorOnAppLaunchKey));
-    }
-    if (isFormatCodeOnSave()) {
-      analytics.sendEvent("settings", afterLastPeriod(formatCodeOnSaveKey));
-
-      if (isOrganizeImportsOnSave()) {
-        analytics.sendEvent("settings", afterLastPeriod(organizeImportsOnSaveKey));
-      }
-    }
-    if (isShowOnlyWidgets()) {
-      analytics.sendEvent("settings", afterLastPeriod(showOnlyWidgetsKey));
-    }
-
-    if (isSyncingAndroidLibraries()) {
-      analytics.sendEvent("settings", afterLastPeriod(syncAndroidLibrariesKey));
-    }
-    if (isDisableTrackWidgetCreation()) {
-      analytics.sendEvent("settings", afterLastPeriod(disableTrackWidgetCreationKey));
-    }
-
-    if (isShowBuildMethodGuides()) {
-      analytics.sendEvent("settings", afterLastPeriod(showBuildMethodGuidesKey));
-    }
-
-    if (isShowStructuredErrors()) {
-      analytics.sendEvent("settings", afterLastPeriod(showStructuredErrors));
-    }
-  }
-
-  public void addListener(Listener listener) {
+  public void addListener(@NotNull Listener listener) {
     dispatcher.addListener(listener);
-  }
-
-  public void removeListener(Listener listener) {
-    dispatcher.removeListener(listener);
   }
 
   public boolean isReloadOnSave() {
     return getPropertiesComponent().getBoolean(reloadOnSaveKey, true);
-  }
-
-  public boolean isTrackWidgetCreationEnabled(Project project) {
-    final FlutterSdk flutterSdk = FlutterSdk.getFlutterSdk(project);
-    if (flutterSdk != null && flutterSdk.getVersion().isTrackWidgetCreationRecommended()) {
-      return !getPropertiesComponent().getBoolean(disableTrackWidgetCreationKey, false);
-    }
-    else {
-      return false;
-    }
-  }
-
-  public boolean isDisableTrackWidgetCreation() {
-    return getPropertiesComponent().getBoolean(disableTrackWidgetCreationKey, false);
-  }
-
-  public void setDisableTrackWidgetCreation(boolean value) {
-    getPropertiesComponent().setValue(disableTrackWidgetCreationKey, value, false);
-
-    fireEvent();
   }
 
   public void setReloadOnSave(boolean value) {
@@ -151,32 +98,22 @@ public class FlutterSettings {
     fireEvent();
   }
 
-  public boolean isShowOnlyWidgets() {
-    return getPropertiesComponent().getBoolean(showOnlyWidgetsKey, false);
-  }
-
-  public void setShowOnlyWidgets(boolean value) {
-    getPropertiesComponent().setValue(showOnlyWidgetsKey, value, false);
-
-    fireEvent();
-  }
-
-  public boolean isSyncingAndroidLibraries() {
-    return getPropertiesComponent().getBoolean(syncAndroidLibrariesKey, false);
-  }
-
-  public void setSyncingAndroidLibraries(boolean value) {
-    getPropertiesComponent().setValue(syncAndroidLibrariesKey, value, false);
-
-    fireEvent();
-  }
-
   public boolean isShowStructuredErrors() {
-    return getPropertiesComponent().getBoolean(showStructuredErrors, true);
+    return getPropertiesComponent().getBoolean(showStructuredErrorsKey, true);
   }
 
   public void setShowStructuredErrors(boolean value) {
-    getPropertiesComponent().setValue(showStructuredErrors, value, true);
+    getPropertiesComponent().setValue(showStructuredErrorsKey, value, true);
+
+    fireEvent();
+  }
+
+  public boolean isIncludeAllStackTraces() {
+    return getPropertiesComponent().getBoolean(includeAllStackTracesKey, true);
+  }
+
+  public void setIncludeAllStackTraces(boolean value) {
+    getPropertiesComponent().setValue(includeAllStackTracesKey, value, true);
 
     fireEvent();
   }
@@ -191,18 +128,21 @@ public class FlutterSettings {
     fireEvent();
   }
 
-  /**
-   * Tells IntelliJ to show all run configurations possible when the user clicks on the left-hand green arror to run a test.
-   * <p>
-   * Useful for {@link io.flutter.run.bazelTest.FlutterBazelTestConfigurationType} to show both watch and regular configurations
-   * in the left-hand gutter.
-   */
-  public boolean showAllRunConfigurationsInContext() {
-    return Registry.is(suggestAllRunConfigurationsFromContextKey, false);
+  public boolean isPerserveLogsDuringHotReloadAndRestart() {
+    return getPropertiesComponent().getBoolean(perserveLogsDuringHotReloadAndRestartKey, false);
   }
 
-  public void setShowAllRunConfigurationsInContext(boolean value) {
-    Registry.get(suggestAllRunConfigurationsFromContextKey).setValue(value);
+  public void setPerserveLogsDuringHotReloadAndRestart(boolean value) {
+    getPropertiesComponent().setValue(perserveLogsDuringHotReloadAndRestartKey, value, false);
+    fireEvent();
+  }
+
+  public boolean isEnableJcefBrowser() {
+    return getPropertiesComponent().getBoolean(enableJcefBrowserKey, false);
+  }
+
+  public void setEnableJcefBrowser(boolean value) {
+    getPropertiesComponent().setValue(enableJcefBrowserKey, value, false);
 
     fireEvent();
   }
@@ -228,35 +168,68 @@ public class FlutterSettings {
   }
 
   public boolean isShowClosingLabels() {
-    return DartClosingLabelManager.getInstance().getShowClosingLabels();
+    var labelManager = DartClosingLabelManager.getInstance();
+    return labelManager != null && labelManager.getShowClosingLabels();
   }
 
   public void setShowClosingLabels(boolean value) {
-    DartClosingLabelManager.getInstance().setShowClosingLabels(value);
+    var labelManager = DartClosingLabelManager.getInstance();
+    if (labelManager != null) {
+      labelManager.setShowClosingLabels(value);
+    }
+  }
+
+  public String getFontPackages() {
+    return getPropertiesComponent().getValue(fontPackagesKey, "");
+  }
+
+  public void setFontPackages(String value) {
+    getPropertiesComponent().setValue(fontPackagesKey, value == null ? "" : value);
   }
 
   protected void fireEvent() {
     dispatcher.getMulticaster().settingsChanged();
   }
 
-  private static String afterLastPeriod(String str) {
-    final int index = str.lastIndexOf('.');
-    return index == -1 ? str : str.substring(index + 1);
+  public boolean isAllowTestsInSourcesRoot() {
+    return getPropertiesComponent().getBoolean(allowTestsInSourcesRootKey, false);
   }
 
-  public boolean isEnableHotUi() {
-    return getPropertiesComponent().getBoolean(enableHotUiKey, false);
-  }
-
-  public void setEnableHotUi(boolean value) {
-    getPropertiesComponent().setValue(enableHotUiKey, value, false);
-
+  public void setAllowTestsInSourcesRoot(boolean value) {
+    getPropertiesComponent().setValue(allowTestsInSourcesRootKey, value, false);
     fireEvent();
   }
 
-  public boolean isEnableHotUiInCodeEditor() {
-    // We leave this setting off for now to avoid possible performance and
-    // usability issues rendering previews directly in the code editor.
-    return false;
+
+
+  /**
+   * See {FlutterSdkVersion#MIN_SDK_SUPPORTED}.
+   */
+  public boolean isSdkVersionOutdatedWarningAcknowledged(@Nullable String versionText, boolean isBeforeSunset) {
+    return getPropertiesComponent().getBoolean(getSdkVersionKey(versionText, isBeforeSunset));
+  }
+
+  public void setSdkVersionOutdatedWarningAcknowledged(@Nullable String versionText, boolean isBeforeSunset, boolean value) {
+    getPropertiesComponent().setValue(getSdkVersionKey(versionText, isBeforeSunset), value);
+  }
+
+  private String getSdkVersionKey(@Nullable String versionText, boolean isBeforeSunset) {
+    return sdkVersionOutdatedWarningAcknowledgedKey + "_" + versionText + "_" + (isBeforeSunset ? "beforeSunset" : "afterSunset");
+  }
+
+  public boolean isAndroidStudioBotAcknowledged() {
+    return getPropertiesComponent().getBoolean(androidStudioBotAcknowledgedKey, false);
+  }
+
+  public void setAndroidStudioBotAcknowledgedKey(boolean value) {
+    getPropertiesComponent().setValue(androidStudioBotAcknowledgedKey, value);
+  }
+
+  public boolean isFilePathLoggingEnabled() {
+    return getPropertiesComponent().getBoolean(enableFilePathLoggingKey, false);
+  }
+
+  public void setFilePathLoggingEnabled(boolean value) {
+    getPropertiesComponent().setValue(enableFilePathLoggingKey, value);
   }
 }

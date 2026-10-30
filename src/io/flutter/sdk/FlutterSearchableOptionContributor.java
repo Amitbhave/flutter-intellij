@@ -11,22 +11,31 @@ import io.flutter.FlutterBundle;
 import io.flutter.FlutterConstants;
 import org.jetbrains.annotations.NotNull;
 
+// Note: update this file when updating FlutterSettingsConfigurable.
+
 public class FlutterSearchableOptionContributor extends SearchableOptionContributor {
   @Override
   public void processOptions(@NotNull SearchableOptionProcessor processor) {
+    // Keep these in the same order as FlutterBundle.properties
     add(processor, FlutterBundle.message("settings.try.out.features.still.under.development"));
-    add(processor, FlutterBundle.message("settings.experimental.flutter.logging.view"));
-    add(processor, FlutterBundle.message("settings.enable.android.gradle.sync"));
-    // For some reason the word "report" is ignored by the search feature, but the other words work.
-    add(processor, FlutterBundle.message("settings.report.google.analytics"));
     add(processor, FlutterBundle.message("settings.enable.verbose.logging"));
     add(processor, FlutterBundle.message("settings.format.code.on.save"));
     add(processor, FlutterBundle.message("settings.organize.imports.on.save"));
     add(processor, FlutterBundle.message("settings.flutter.version"));
     add(processor, FlutterBundle.message("settings.open.inspector.on.launch"));
     add(processor, FlutterBundle.message("settings.hot.reload.on.save"));
-    add(processor, FlutterBundle.message("settings.disable.tracking.widget.creation"));
-    add(processor, FlutterBundle.message("settings.enable.bazel.test.runner"));
+    add(processor, FlutterBundle.message("settings.allow.tests.in.sources"));
+    add(processor, FlutterBundle.message("settings.allow.tests.tooltip"));
+    add(processor, FlutterBundle.message("settings.font.packages"));
+    add(processor, FlutterBundle.message("settings.experiments"));
+    add(processor, FlutterBundle.message("settings.editor"));
+    add(processor, FlutterBundle.message("settings.show.build.guides"));
+    add(processor, FlutterBundle.message("settings.show.build.guides.tooltip"));
+    add(processor, FlutterBundle.message("settings.format.code.tooltip"));
+    add(processor, FlutterBundle.message("settings.organize.imports.tooltip"));
+    add(processor, FlutterBundle.message("settings.show.closing.labels"));
+    add(processor, FlutterBundle.message("settings.sdk.copy.content"));
+    add(processor, FlutterBundle.message("settings.enable.verbose.logging.tooltip"));
   }
 
   private static void add(@NotNull SearchableOptionProcessor processor, @NotNull String key) {

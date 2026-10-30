@@ -11,28 +11,42 @@ import com.google.common.collect.ImmutableList;
 import com.intellij.execution.ExecutionException;
 import com.intellij.execution.configurations.GeneralCommandLine;
 import com.intellij.execution.process.ProcessHandler;
+import com.intellij.openapi.application.ModalityState;
 import com.intellij.openapi.diagnostic.Logger;
 import com.intellij.openapi.project.Project;
+import com.intellij.openapi.ui.DialogWrapper;
+import com.intellij.openapi.ui.Messages;
 import com.intellij.openapi.util.io.FileUtil;
-import com.intellij.openapi.vfs.CharsetToolkit;
+import com.intellij.openapi.util.text.StringUtil;
+import com.jetbrains.lang.dart.analytics.Analytics;
 import io.flutter.FlutterMessages;
 import io.flutter.FlutterUtils;
 import io.flutter.android.IntelliJAndroidSdk;
-import io.flutter.bazel.Workspace;
-import io.flutter.bazel.WorkspaceCache;
+import io.flutter.logging.PluginLogger;
 import io.flutter.run.FlutterDevice;
 import io.flutter.sdk.FlutterSdk;
 import io.flutter.sdk.FlutterSdkUtil;
 import io.flutter.settings.FlutterSettings;
 import io.flutter.utils.FlutterModuleUtils;
-import io.flutter.utils.MostlySilentOsProcessHandler;
+import io.flutter.utils.MostlySilentColoredProcessHandler;
+import io.flutter.utils.OpenApiUtils;
+import io.flutter.utils.SystemUtils;
 import org.jetbrains.annotations.NotNull;
 import org.jetbrains.annotations.Nullable;
 
+import javax.swing.JComponent;
+import javax.swing.JPanel;
+import javax.swing.JTextPane;
+import java.io.File;
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
-import java.util.concurrent.*;
+import java.util.concurrent.CancellationException;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
@@ -49,7 +63,7 @@ class DeviceDaemon {
   /**
    * Attempt to start the daemon this many times before showing the user a warning that the daemon is having trouble starting up.
    */
-  private static final int RESTART_ATTEMPTS_BEFORE_WARNING = 100;
+  private static final int RESTART_ATTEMPTS_BEFORE_WARNING = 1;
 
   /**
    * A unique id used to log device daemon actions.
@@ -108,7 +122,8 @@ class DeviceDaemon {
    */
   void shutdown() {
     if (!process.isProcessTerminated()) {
-      LOG.info("shutting down Flutter device daemon #" + id + ": " + command.toString());
+      LOG.info(
+        "shutting down Flutter device daemon #" + id + ": " + command.toString(FlutterSettings.getInstance().isFilePathLoggingEnabled()));
     }
     listener.running.set(false);
     process.destroyProcess();
@@ -126,15 +141,6 @@ class DeviceDaemon {
     }
 
     final String androidHome = IntelliJAndroidSdk.chooseAndroidHome(project, false);
-
-    // See if the Bazel workspace provides a script.
-    final Workspace workspace = WorkspaceCache.getInstance(project).get();
-    if (workspace != null) {
-      final String script = workspace.getDaemonScript();
-      if (script != null) {
-        return new Command(workspace.getRoot().getPath(), script, ImmutableList.of(), androidHome);
-      }
-    }
 
     // Otherwise, use the Flutter SDK.
     final FlutterSdk sdk = FlutterSdk.getFlutterSdk(project);
@@ -160,7 +166,7 @@ class DeviceDaemon {
   }
 
   private static boolean usesFlutter(@NotNull final Project project) {
-    return FlutterModuleUtils.isFlutterBazelProject(project) || FlutterModuleUtils.hasFlutterModule(project);
+    return FlutterModuleUtils.hasFlutterModule(project);
   }
 
   /**
@@ -200,9 +206,9 @@ class DeviceDaemon {
                        Runnable deviceChanged,
                        Consumer<String> processStopped) throws ExecutionException {
       final int daemonId = nextDaemonId.incrementAndGet();
-      LOG.info("starting Flutter device daemon #" + daemonId + ": " + toString());
+      LOG.info("starting Flutter device daemon #" + daemonId + ": " + toString(FlutterSettings.getInstance().isFilePathLoggingEnabled()));
       // The mostly silent process handler reduces CPU usage of the daemon process.
-      final ProcessHandler process = new MostlySilentOsProcessHandler(toCommandLine());
+      final ProcessHandler process = new MostlySilentColoredProcessHandler(toCommandLine());
 
       boolean succeeded = false;
       try {
@@ -211,6 +217,7 @@ class DeviceDaemon {
         final DaemonApi api = new DaemonApi(process);
         final Listener listener = new Listener(daemonId, api, devices, deviceChanged, processStopped);
         api.listen(process, listener);
+        process.startNotify();
 
         final Future<Void> ready = listener.connected.thenCompose((Void ignored) -> api.enableDeviceEvents());
 
@@ -222,14 +229,12 @@ class DeviceDaemon {
           }
           else if (process.isProcessTerminated()) {
             final Integer exitCode = process.getExitCode();
-            final String failureMessage = ("Flutter device daemon #" +
-                                           daemonId +
-                                           ": process exited during startup. Exit code: " +
-                                           exitCode +
-                                           ", stderr:\n" +
-                                           api.getStderrTail());
+            String failureMessage = "Flutter device daemon #" + daemonId + " exited (exit code " + exitCode + ")";
+            if (!api.getStderrTail().isEmpty()) {
+              failureMessage += ", stderr: " + api.getStderrTail();
+            }
             attempts++;
-            if (attempts < DeviceDaemon.RESTART_ATTEMPTS_BEFORE_WARNING) {
+            if (attempts <= DeviceDaemon.RESTART_ATTEMPTS_BEFORE_WARNING) {
               LOG.warn(failureMessage);
             }
             else {
@@ -239,14 +244,18 @@ class DeviceDaemon {
               // The second time we log this error, we'll show a customized message to alert the user to the specific problem.
               if (attempts == DeviceDaemon.RESTART_ATTEMPTS_BEFORE_WARNING + 1) {
                 // Show a message in the UI when we reach the warning threshold.
-                FlutterMessages.showError("Flutter device daemon", failureMessage);
+                FlutterMessages.showError("Flutter device daemon", failureMessage, null);
+              }
+              else if (attempts == DeviceDaemon.RESTART_ATTEMPTS_BEFORE_WARNING + 4) {
+                OpenApiUtils.safeInvokeLater(() -> new DaemonCrashReporter().show(), ModalityState.nonModal());
+                return null;
               }
             }
           }
 
           try {
             // Retry with a longer delay if we are encountering repeated failures of the daemon.
-            ready.get(attempts < DeviceDaemon.RESTART_ATTEMPTS_BEFORE_WARNING ? 100 : 10000, TimeUnit.MILLISECONDS);
+            ready.get(attempts <= DeviceDaemon.RESTART_ATTEMPTS_BEFORE_WARNING ? 100L : 10000L * attempts, TimeUnit.MILLISECONDS);
 
             succeeded = true;
             return new DeviceDaemon(daemonId, this, process, listener, devices);
@@ -259,7 +268,7 @@ class DeviceDaemon {
           }
           catch (java.util.concurrent.ExecutionException e) {
             // This is not a user facing crash - we log (and no devices will be discovered).
-            FlutterUtils.warn(LOG, e.getCause());
+            FlutterUtils.warn(LOG, "Error while starting device daemon", e, true);
           }
         }
       }
@@ -272,10 +281,9 @@ class DeviceDaemon {
 
     @Override
     public boolean equals(Object obj) {
-      if (!(obj instanceof Command)) {
+      if (!(obj instanceof Command other)) {
         return false;
       }
-      final Command other = (Command)obj;
       return Objects.equal(workDir, other.workDir)
              && Objects.equal(command, other.command)
              && Objects.equal(parameters, other.parameters)
@@ -289,22 +297,27 @@ class DeviceDaemon {
 
     private GeneralCommandLine toCommandLine() {
       final GeneralCommandLine result = new GeneralCommandLine().withWorkDirectory(workDir);
-      result.setCharset(CharsetToolkit.UTF8_CHARSET);
+      result.setCharset(StandardCharsets.UTF_8);
       result.setExePath(FileUtil.toSystemDependentName(command));
-      result.withEnvironment(FlutterSdkUtil.FLUTTER_HOST_ENV, FlutterSdkUtil.getFlutterHostEnvValue());
+      result.withEnvironment(FlutterSdkUtil.FLUTTER_HOST_ENV, (new FlutterSdkUtil()).getFlutterHostEnvValue());
       if (androidHome != null) {
         result.withEnvironment("ANDROID_HOME", androidHome);
       }
       for (String param : parameters) {
         result.addParameter(param);
       }
+      Analytics.updateEnvironment(result);
       return result;
     }
 
     @Override
     public String toString() {
+      return toString(true);
+    }
+
+    public @NotNull String toString(boolean showFullPath) {
       final StringBuilder out = new StringBuilder();
-      out.append(command);
+      out.append(showFullPath ? command : command.substring(command.lastIndexOf(File.separatorChar) + 1));
       if (!parameters.isEmpty()) {
         out.append(' ');
         out.append(Joiner.on(' ').join(parameters));
@@ -354,14 +367,16 @@ class DeviceDaemon {
 
     @Override
     public void onDaemonShowMessage(@NotNull DaemonEvent.DaemonShowMessage event) {
-      if ("error".equals(event.level)) {
-        FlutterMessages.showError(event.title, event.message);
-      }
-      else if ("warning".equals(event.level)) {
-        FlutterMessages.showWarning(event.title, event.message);
-      }
-      else {
-        FlutterMessages.showInfo(event.title, event.message);
+      if (StringUtil.isNotEmpty(event.level) && StringUtil.isNotEmpty(event.title) && StringUtil.isNotEmpty(event.message)) {
+        if ("error".equals(event.level)) {
+          FlutterMessages.showError(event.title, event.message, null);
+        }
+        else if ("warning".equals(event.level)) {
+          FlutterMessages.showWarning(event.title, event.message, null);
+        }
+        else {
+          FlutterMessages.showInfo(event.title, event.message, null);
+        }
       }
     }
 
@@ -375,7 +390,10 @@ class DeviceDaemon {
       }
 
       final FlutterDevice newDevice = new FlutterDevice(event.id,
-                                                        event.name == null ? event.id : event.name,
+                                                        event.emulatorId == null
+                                                        ? (event.name == null ? event.id : event.name)
+                                                        : (java.util.Objects.equals(event.platformType, "android")
+                                                           ? event.emulatorId : event.name),
                                                         event.platform,
                                                         event.emulator,
                                                         event.category,
@@ -413,5 +431,42 @@ class DeviceDaemon {
     }
   }
 
-  private static final Logger LOG = Logger.getInstance(DeviceDaemon.class);
+  private static final @NotNull Logger LOG = PluginLogger.createLogger(DeviceDaemon.class);
+
+  // If the daemon cannot be started, display a modal dialog with hopefully helpful
+  // instructions on how to fix the problem. This is a big problem; we really do
+  // need to interupt the user.
+  // https://github.com/flutter/flutter-intellij/issues/5521
+  private static class DaemonCrashReporter extends DialogWrapper {
+    private JPanel myPanel;
+    private JTextPane myTextPane;
+
+    DaemonCrashReporter() {
+      super(null, false, DialogWrapper.IdeModalityType.IDE);
+      setTitle("Flutter Device Daemon Crash");
+      myPanel = new JPanel();
+      myTextPane = new JTextPane();
+      final String os = SystemUtils.getOsNameAndVersion();
+      final String link = "https://www.google.com/search?q=increase maximum file handles " + os;
+      Messages.installHyperlinkSupport(myTextPane);
+      final String message =
+        "<html><body><p>The Flutter device daemon cannot be started. " +
+        "<br>Please check your configuration and restart the IDE. " +
+        "<br><br>You may need to <a href=\"" + link +
+        "\">increase the maximum number of file handles</a>" +
+        "<br>available globally.</body></html>";
+
+      myTextPane.setText(message);
+      myPanel.add(myTextPane);
+      init();
+      //noinspection ConstantConditions
+      getButton(getCancelAction()).setVisible(false);
+    }
+
+    @Nullable
+    @Override
+    protected JComponent createCenterPanel() {
+      return myPanel;
+    }
+  }
 }

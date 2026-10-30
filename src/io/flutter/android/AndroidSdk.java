@@ -7,8 +7,7 @@ package io.flutter.android;
 
 import com.intellij.execution.ExecutionException;
 import com.intellij.execution.configurations.GeneralCommandLine;
-import com.intellij.execution.process.OSProcessHandler;
-import com.intellij.execution.process.ProcessAdapter;
+import com.intellij.execution.process.ColoredProcessHandler;
 import com.intellij.execution.process.ProcessEvent;
 import com.intellij.execution.process.ProcessOutputTypes;
 import com.intellij.openapi.diagnostic.Logger;
@@ -17,7 +16,9 @@ import com.intellij.openapi.util.Key;
 import com.intellij.openapi.util.SystemInfo;
 import com.intellij.openapi.vfs.LocalFileSystem;
 import com.intellij.openapi.vfs.VirtualFile;
-import io.flutter.FlutterUtils;
+import io.flutter.logging.PluginLogger;
+import io.flutter.settings.FlutterSettings;
+import io.flutter.utils.ProcessAdapter;
 import org.jetbrains.annotations.NotNull;
 import org.jetbrains.annotations.Nullable;
 
@@ -29,7 +30,7 @@ import java.util.List;
  * A wrapper around an Android SDK on disk.
  */
 public class AndroidSdk {
-  private static final Logger LOG = Logger.getInstance(AndroidSdk.class);
+  private static final @NotNull Logger LOG = PluginLogger.createLogger(AndroidSdk.class);
 
   @Nullable
   public static AndroidSdk createFromProject(@NotNull Project project) {
@@ -41,13 +42,16 @@ public class AndroidSdk {
     if (file == null) {
       return null;
     }
-    return new AndroidSdk(file);
+    return new AndroidSdk(project, file);
   }
+
+  @NotNull Project project;
 
   @NotNull
   private final VirtualFile home;
 
-  AndroidSdk(@NotNull VirtualFile home) {
+  AndroidSdk(@NotNull Project project, @NotNull VirtualFile home) {
+    this.project = project;
     this.home = home;
   }
 
@@ -90,10 +94,10 @@ public class AndroidSdk {
 
     try {
       final StringBuilder stringBuilder = new StringBuilder();
-      final OSProcessHandler process = new OSProcessHandler(cmd);
+      final ColoredProcessHandler process = new ColoredProcessHandler(cmd);
       process.addProcessListener(new ProcessAdapter() {
         @Override
-        public void onTextAvailable(ProcessEvent event, Key outputType) {
+        public void onTextAvailable(@NotNull ProcessEvent event, @NotNull Key outputType) {
           if (outputType == ProcessOutputTypes.STDOUT) {
             stringBuilder.append(event.getText());
           }
@@ -107,7 +111,7 @@ public class AndroidSdk {
       }
 
       final Integer exitCode = process.getExitCode();
-      if (exitCode == null || process.getExitCode() != 0) {
+      if (exitCode == null || exitCode != 0) {
         return Collections.emptyList();
       }
 
@@ -125,7 +129,12 @@ public class AndroidSdk {
       return emulators;
     }
     catch (ExecutionException | RuntimeException e) {
-      FlutterUtils.warn(LOG, "Error listing android emulators", e);
+      if (FlutterSettings.getInstance().isFilePathLoggingEnabled()) {
+        LOG.warn("Error listing android emulators", e);
+      }
+      else {
+        LOG.warn("Error listing android emulators");
+      }
       return Collections.emptyList();
     }
   }

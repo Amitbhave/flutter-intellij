@@ -1,5 +1,8 @@
 # Plugin Smoke Testing
 
+> [!WARNING]
+> **Outdated Documentation**: This smoke testing document contains legacy manual test procedures. For up-to-date release verification instructions and the active manual testing checklist, refer to the [`release-plugin` skill](../.agents/skills/release-plugin/SKILL.md#5-manual-testing-checklist).
+
 Manual tests to execute before plugin releases.
 
 ## Setup
@@ -19,11 +22,12 @@ Pre-reqs: Run through the [flutter setup](https://flutter.dev/docs/get-started/i
 
 ## Project Creation
 
-Validate basic project creation. Find your other.xml and remove FLUTTER_SDK_KNOWN_PATHS and remove `flutter` from your PATH.
+Validate basic project creation. Find your other.xml (~/Library/Application Support/Google/<IDE>/options/other.xml) and remove FLUTTER_SDK_KNOWN_PATHS and remove `flutter` from your PATH.
 This might require a reboot. Start from the Welcome screen at least once.
 
 * Create a **simple project** (`File > New > Project...`, pick `Flutter`; on Android Studio, `File > New > New Flutter Project...`).
   * (select an `Application` type project)
+  * use a project name that contains a space -- project location must be lowercase_with_underscores
 * Confirm that:
   * Project contents are created.
     * Verify that a run configuration (`main.dart`) is enabled in the run/debug selector.
@@ -55,13 +59,9 @@ This might require a reboot. Start from the Welcome screen at least once.
   * Project contents are created.
     * Verify that a run configuration (`main.dart`) is enabled in the run/debug selector.
     * Verify that directories `.ios` and `.android` exist.
-* Convert to editable native code (`Tools > Flutter > Make host app editable`)
-* Confirm that:
-  * Project contents are created.
-    * Verify that directories `ios` and `android` exist, in addition to `.ios` and `.android`.
 * Run the app and verify that it starts correctly.
 * Stop the app.
-* Navigate to and select `<project root>/android`
+* Navigate to and select `<project root>/.android`
 * Select `Flutter > Open Android module in Android Studio` from the project list menu
   * Opening in a new window is recommended. If necessary change your preference/setting to allow that.
 * Verify that Gradle sync completes normally
@@ -74,7 +74,7 @@ Validate that our example projects can be opened.
 
 * close any open projects in IDEA
 * from the Welcome screen choose `Open` (IntelliJ) or `Open an existing Android Studio project` (AS)
-* browse to and select `<flutter-root>/examples/flutter_gallery`
+* browse to and select `<flutter-root>/examples/hello_world`
 * ensure there are no analysis errors or warnings
 * test that code completion is working as expected
 * ensure that the `main.dart` launch configuration shows up and is selected
@@ -124,7 +124,6 @@ In the newly created app:
 * open the inspector
 * change the display by clicking `Render Tree` and the refresh button
 * open the performance view
-* (in Android Studio): verify that the performance view is active and the memory view is not
 * hit resume in the debugger
 
 ## Hot Reload
@@ -175,7 +174,7 @@ Verify that projects without Flutter project metadata open properly and are give
 Verify installation and configuration in a fresh IDEA installation.
 
 * Follow the instructions to
-  [simulate a fresh installation](https://github.com/flutter/flutter-intellij/wiki/Development#simulating-a-fresh-install).
+  [simulate a fresh installation](Development.md#simulating-a-fresh-install).
 * (If not running in a "runtime workbench", [install the plugins](https://flutter.dev/docs/development/packages-and-plugins/using-packages).)
 * Open "Languages & Frameworks>Flutter" in Preferences and verify that there is
   no Flutter SDK set.
@@ -191,12 +190,12 @@ directory once and put it outside the app another time.
 
 ### Create an Android app
 
-Start Android Studio and use the File > New > New Project menu to fire 
-up the new project wizard. Choose the template that includes a Basic
-Activity. One the next page, use Kotlin and minimum API level 16.
+Start Android Studio and use the File > New > New Project menu to open 
+the new project wizard. Choose the template that includes a Basic
+Activity. On the next page, use Kotlin and minimum API level 16.
 Let the system stabilize (Gradle sync).
 
-Close the editor for content_main.xml. Switch the Project view to
+Switch the Project view to
 the Project Files mode. Collapse the Gradle window if it is open.
 
 ### Create a Flutter module
@@ -215,10 +214,10 @@ Go to the editor for MainActivity.kt. Change the onCreate method:
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_main)
-        setSupportActionBar(toolbar)
+        setSupportActionBar(findViewById(R.id.toolbar))
         val engine = FlutterEngine(this.applicationContext)
         engine.dartExecutor.executeDartEntrypoint(DartExecutor.DartEntrypoint.createDefault())
-        fab.setOnClickListener { view ->
+        findViewById<FloatingActionButton>(R.id.fab).setOnClickListener { view ->
             FlutterEngineCache.getInstance().put("1", engine)
             startActivity(FlutterActivity.withCachedEngine("1").build(this))
         }

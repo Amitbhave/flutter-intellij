@@ -9,10 +9,11 @@ import com.intellij.openapi.actionSystem.ActionManager;
 import com.intellij.openapi.actionSystem.AnActionEvent;
 import com.intellij.openapi.project.Project;
 import com.intellij.openapi.util.Computable;
+import com.jetbrains.lang.dart.analytics.Analytics;
+import com.jetbrains.lang.dart.analytics.AnalyticsData;
 import icons.FlutterIcons;
 import io.flutter.FlutterBundle;
 import io.flutter.FlutterConstants;
-import io.flutter.FlutterInitializer;
 import io.flutter.run.FlutterReloadManager;
 import io.flutter.run.daemon.FlutterApp;
 import org.jetbrains.annotations.NotNull;
@@ -25,7 +26,13 @@ public class RestartFlutterApp extends FlutterAppAction {
   public RestartFlutterApp(@NotNull FlutterApp app, @NotNull Computable<Boolean> isApplicable) {
     super(app, TEXT, DESCRIPTION, FlutterIcons.HotRestart, isApplicable, ID);
     // Shortcut is associated with toolbar action.
-    copyShortcutFrom(ActionManager.getInstance().getAction("Flutter.Toolbar.RestartAction"));
+    ActionManager actionManager = ActionManager.getInstance();
+    if (actionManager != null) {
+      var action = actionManager.getAction("Flutter.Toolbar.RestartAction");
+      if (action != null) {
+        copyShortcutFrom(action);
+      }
+    }
   }
 
   @Override
@@ -34,9 +41,12 @@ public class RestartFlutterApp extends FlutterAppAction {
     if (project == null) {
       return;
     }
+    var reloadManager = FlutterReloadManager.getInstance(project);
+    if (reloadManager != null) {
+      reloadManager.saveAllAndRestart(getApp(), FlutterConstants.RELOAD_REASON_MANUAL);
+    }
 
-    FlutterInitializer.sendAnalyticsAction(this);
-
-    FlutterReloadManager.getInstance(project).saveAllAndRestart(getApp(), FlutterConstants.RELOAD_REASON_MANUAL);
+    var analyticsData = AnalyticsData.forAction(this, e);
+    Analytics.report(analyticsData);
   }
 }

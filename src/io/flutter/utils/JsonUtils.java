@@ -5,18 +5,17 @@
  */
 package io.flutter.utils;
 
-import com.google.gson.JsonArray;
 import com.google.gson.JsonElement;
 import com.google.gson.JsonNull;
 import com.google.gson.JsonObject;
-import org.apache.commons.lang.StringUtils;
+import com.google.gson.JsonParser;
+import com.google.gson.JsonSyntaxException;
 import org.jetbrains.annotations.NotNull;
 import org.jetbrains.annotations.Nullable;
 
-import java.util.ArrayList;
-import java.util.Collections;
-import java.util.List;
-import java.util.Objects;
+import java.util.HashSet;
+import java.util.Map;
+import java.util.Set;
 
 public class JsonUtils {
 
@@ -38,20 +37,21 @@ public class JsonUtils {
     return value instanceof JsonNull ? -1 : value.getAsInt();
   }
 
-  @NotNull
-  public static List<String> getValues(@NotNull JsonObject json, @NotNull String member) {
-    if (!json.has(member)) {
-      return Collections.emptyList();
+  // JsonObject.keySet() is defined in 2.8.6 but not 2.7.
+  // The 2020.3 version of Android Studio includes both, and 2.7 is first on the class path.
+  public static Set<String> getKeySet(JsonObject obj) {
+    final Set<Map.Entry<String, JsonElement>> entries = obj.entrySet();
+    final HashSet<String> strings = new HashSet<>(entries.size());
+    for (Map.Entry<String, JsonElement> entry : entries) {
+      strings.add(entry.getKey());
     }
-
-    final JsonArray rawValues = json.getAsJsonArray(member);
-    final ArrayList<String> values = new ArrayList<>(rawValues.size());
-    rawValues.forEach(element -> values.add(element.getAsString()));
-
-    return values;
+    return strings;
   }
 
-  public static boolean hasJsonData(@Nullable String data) {
-    return StringUtils.isNotEmpty(data) && !Objects.equals(data, "null");
+  /**
+   * Parses the specified JSON string into a JsonElement.
+   */
+  public static JsonElement parseString(String json) throws JsonSyntaxException {
+    return JsonParser.parseString(json);
   }
 }

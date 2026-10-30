@@ -5,13 +5,20 @@
  */
 package io.flutter.sdk;
 
+import com.intellij.execution.process.CapturingProcessAdapter;
+import com.intellij.execution.process.ColoredProcessHandler;
 import com.intellij.execution.process.ProcessOutput;
+import com.intellij.icons.AllIcons;
 import com.intellij.ide.actions.ShowSettingsUtilImpl;
-import com.intellij.ide.browsers.BrowserLauncher;
+import com.intellij.ide.actionsOnSave.ActionsOnSaveConfigurable;
+import com.intellij.notification.Notification;
+import com.intellij.notification.NotificationType;
+import com.intellij.notification.Notifications;
 import com.intellij.openapi.actionSystem.ActionToolbar;
 import com.intellij.openapi.application.ApplicationManager;
 import com.intellij.openapi.application.ModalityState;
-import com.intellij.openapi.diagnostic.Logger;
+import com.intellij.openapi.fileChooser.FileChooser;
+import com.intellij.openapi.fileChooser.FileChooserDescriptor;
 import com.intellij.openapi.fileChooser.FileChooserDescriptorFactory;
 import com.intellij.openapi.ide.CopyPasteManager;
 import com.intellij.openapi.options.ConfigurationException;
@@ -19,81 +26,90 @@ import com.intellij.openapi.options.SearchableConfigurable;
 import com.intellij.openapi.project.Project;
 import com.intellij.openapi.ui.ComboBox;
 import com.intellij.openapi.ui.FixedSizeButton;
-import com.intellij.openapi.ui.TextComponentAccessor;
 import com.intellij.openapi.util.io.FileUtil;
 import com.intellij.openapi.util.io.FileUtilRt;
 import com.intellij.openapi.util.text.StringUtil;
-import com.intellij.ui.ComboboxWithBrowseButton;
+import com.intellij.openapi.vfs.VirtualFile;
 import com.intellij.ui.DocumentAdapter;
+import com.intellij.ui.components.ActionLink;
 import com.intellij.ui.components.JBLabel;
-import com.intellij.ui.components.labels.LinkLabel;
+import com.intellij.ui.components.fields.ExtendableTextComponent;
+import com.intellij.ui.components.fields.ExtendableTextField;
 import com.intellij.util.PlatformIcons;
+import icons.FlutterIcons;
 import io.flutter.FlutterBundle;
 import io.flutter.FlutterConstants;
-import io.flutter.FlutterInitializer;
-import io.flutter.FlutterUtils;
-import io.flutter.bazel.Workspace;
-import io.flutter.bazel.WorkspaceCache;
+import io.flutter.FlutterMessages;
+import io.flutter.font.FontPreviewProcessor;
+import io.flutter.pub.PubRoot;
+import io.flutter.pub.PubRoots;
 import io.flutter.settings.FlutterSettings;
+import io.flutter.utils.OpenApiUtils;
 import org.jetbrains.annotations.Nls;
 import org.jetbrains.annotations.NotNull;
 import org.jetbrains.annotations.Nullable;
 
-import javax.swing.*;
+import javax.swing.JCheckBox;
+import javax.swing.JComponent;
+import javax.swing.JPanel;
+import javax.swing.JTextArea;
+import javax.swing.JTextField;
 import javax.swing.event.DocumentEvent;
+import javax.swing.plaf.basic.BasicComboBoxEditor;
 import javax.swing.text.JTextComponent;
 import java.awt.datatransfer.StringSelection;
-import java.net.URI;
-import java.net.URISyntaxException;
+import java.util.List;
+import java.util.Objects;
+import java.util.concurrent.atomic.AtomicReference;
+
+// Note: when updating the settings here, update FlutterSearchableOptionContributor as well.
 
 public class FlutterSettingsConfigurable implements SearchableConfigurable {
-  private static final Logger LOG = Logger.getInstance(FlutterSettingsConfigurable.class);
 
   public static final String FLUTTER_SETTINGS_PAGE_NAME = FlutterBundle.message("flutter.title");
   private static final String FLUTTER_SETTINGS_HELP_TOPIC = "flutter.settings.help";
 
   private JPanel mainPanel;
-  private ComboboxWithBrowseButton mySdkCombo;
+  private ComboBox<String> mySdkCombo;
   private JBLabel myVersionLabel;
-  private JCheckBox myReportUsageInformationCheckBox;
-  private LinkLabel myPrivacyPolicy;
   private JCheckBox myHotReloadOnSaveCheckBox;
   private JCheckBox myEnableVerboseLoggingCheckBox;
   private JCheckBox myOpenInspectorOnAppLaunchCheckBox;
   private JCheckBox myFormatCodeOnSaveCheckBox;
   private JCheckBox myOrganizeImportsOnSaveCheckBox;
-  private JCheckBox myDisableTrackWidgetCreationCheckBox;
   private JCheckBox myShowStructuredErrors;
-  private JCheckBox mySyncAndroidLibrariesCheckBox;
-  private JCheckBox myEnableHotUiCheckBox;
+  private JCheckBox myIncludeAllStackTraces;
 
-  // Settings for Bazel users.
-  private JPanel myBazelOptionsSection;
-  private JCheckBox myShowAllRunConfigurationsInContextCheckBox;
-
-  // Settings for UI as Code experiments:
+  private JCheckBox myEnableJcefBrowserCheckBox;
   private JCheckBox myShowBuildMethodGuides;
   private JCheckBox myShowClosingLabels;
   private FixedSizeButton myCopyButton;
-  private JPanel experimentsPanel;
+  private JTextArea myFontPackagesTextArea; // This should be changed to a structured list some day.
+  private JCheckBox myAllowTestsInSourcesRoot;
+  private ActionLink settingsLink;
+  private JCheckBox myEnableLogsPreserveAfterHotReloadOrRestart;
+  private @NotNull JCheckBox myEnableFilePathLogging;
 
   private final @NotNull Project myProject;
-  private final WorkspaceCache workspaceCache;
 
   private boolean ignoringSdkChanges = false;
-
   private String fullVersionString;
+  private FlutterSdkVersion previousSdkVersion;
+
+  private final AtomicReference<Process> activeVersionProcess = new AtomicReference<>();
 
   FlutterSettingsConfigurable(@NotNull Project project) {
     this.myProject = project;
-    workspaceCache = WorkspaceCache.getInstance(project);
     init();
-
     myVersionLabel.setText(" ");
   }
 
   private void init() {
-    mySdkCombo.getComboBox().setEditable(true);
+    final FlutterSdk sdk = FlutterSdk.getFlutterSdk(myProject);
+    if (sdk != null) {
+      previousSdkVersion = sdk.getVersion();
+    }
+    mySdkCombo.setEditable(true);
 
     myCopyButton.setSize(ActionToolbar.DEFAULT_MINIMUM_BUTTON_SIZE);
     myCopyButton.setIcon(PlatformIcons.COPY_ICON);
@@ -103,7 +119,7 @@ public class FlutterSettingsConfigurable implements SearchableConfigurable {
       }
     });
 
-    final JTextComponent sdkEditor = (JTextComponent)mySdkCombo.getComboBox().getEditor().getEditorComponent();
+    final JTextComponent sdkEditor = (JTextComponent)mySdkCombo.getEditor().getEditorComponent();
     sdkEditor.getDocument().addDocumentListener(new DocumentAdapter() {
       @Override
       protected void textChanged(@NotNull final DocumentEvent e) {
@@ -112,35 +128,38 @@ public class FlutterSettingsConfigurable implements SearchableConfigurable {
         }
       }
     });
-
-    workspaceCache.subscribe(this::onVersionChanged);
-
-    mySdkCombo.addBrowseFolderListener("Select Flutter SDK Path", null, null,
-                                       FileChooserDescriptorFactory.createSingleFolderDescriptor(),
-                                       TextComponentAccessor.STRING_COMBOBOX_WHOLE_TEXT);
-
-    //noinspection unchecked
-    myPrivacyPolicy.setListener((linkLabel, data) -> {
-      try {
-        BrowserLauncher.getInstance().browse(new URI(FlutterBundle.message("flutter.analytics.privacyUrl")));
-      }
-      catch (URISyntaxException ignore) {
-      }
-    }, null);
-
     myFormatCodeOnSaveCheckBox.addChangeListener(
       (e) -> myOrganizeImportsOnSaveCheckBox.setEnabled(myFormatCodeOnSaveCheckBox.isSelected()));
-
-    // There are other experiments so it is alright to show the experiments
-    // panel even if the syncAndroidLibraries experiment is hidden.
-    // If there are only experiments available on Android studio then add back
-    // the following statement:
-    // experimentsPanel.setVisible(FlutterUtils.isAndroidStudio());
-    mySyncAndroidLibrariesCheckBox.setVisible(FlutterUtils.isAndroidStudio());
+    myShowStructuredErrors.addChangeListener(
+      (e) -> myIncludeAllStackTraces.setEnabled(myShowStructuredErrors.isSelected()));
   }
 
   private void createUIComponents() {
-    mySdkCombo = new ComboboxWithBrowseButton(new ComboBox<>());
+    //noinspection DialogTitleCapitalization
+    ExtendableTextComponent.Extension browseExtension =
+      ExtendableTextComponent.Extension.create(
+        AllIcons.General.OpenDisk,
+        AllIcons.General.OpenDiskHover,
+        "Select Flutter SDK Path",
+        () -> {
+          FileChooserDescriptor descriptor = FileChooserDescriptorFactory.createSingleFolderDescriptor();
+          VirtualFile file = FileChooser.chooseFile(descriptor, mySdkCombo, null, null);
+          if (file != null) {
+            //noinspection DataFlowIssue (sure to be set before the extension is invoked)
+            mySdkCombo.setItem(file.getPath());
+          }
+        });
+    mySdkCombo = new ComboBox<>();
+    mySdkCombo.setEditor(new BasicComboBoxEditor() {
+      @Override
+      protected JTextField createEditorComponent() {
+        ExtendableTextField ecbEditor = new ExtendableTextField();
+        ecbEditor.addExtension(browseExtension);
+        ecbEditor.setBorder(null);
+        return ecbEditor;
+      }
+    });
+    settingsLink = ActionsOnSaveConfigurable.createGoToActionsOnSavePageLink();
   }
 
   @Override
@@ -151,28 +170,19 @@ public class FlutterSettingsConfigurable implements SearchableConfigurable {
 
   @Nullable
   @Override
-  public Runnable enableSearch(String s) {
-    return null;
-  }
-
-  @Nullable
-  @Override
   public JComponent createComponent() {
     return mainPanel;
   }
 
   @Override
   public boolean isModified() {
+
     final FlutterSdk sdk = FlutterSdk.getFlutterSdk(myProject);
     final FlutterSettings settings = FlutterSettings.getInstance();
     final String sdkPathInModel = sdk == null ? "" : sdk.getHomePath();
     final String sdkPathInUI = FileUtilRt.toSystemIndependentName(getSdkPathText());
 
     if (!sdkPathInModel.equals(sdkPathInUI)) {
-      return true;
-    }
-
-    if (FlutterInitializer.getCanReportAnalytics() != myReportUsageInformationCheckBox.isSelected()) {
       return true;
     }
 
@@ -200,11 +210,15 @@ public class FlutterSettingsConfigurable implements SearchableConfigurable {
       return true;
     }
 
+    if (settings.isIncludeAllStackTraces() != myIncludeAllStackTraces.isSelected()) {
+      return true;
+    }
+
     if (settings.isOpenInspectorOnAppLaunch() != myOpenInspectorOnAppLaunchCheckBox.isSelected()) {
       return true;
     }
 
-    if (settings.isDisableTrackWidgetCreation() != myDisableTrackWidgetCreationCheckBox.isSelected()) {
+    if (settings.isPerserveLogsDuringHotReloadAndRestart() != myEnableLogsPreserveAfterHotReloadOrRestart.isSelected()) {
       return true;
     }
 
@@ -212,44 +226,38 @@ public class FlutterSettingsConfigurable implements SearchableConfigurable {
       return true;
     }
 
-    if (settings.isSyncingAndroidLibraries() != mySyncAndroidLibrariesCheckBox.isSelected()) {
+    if (settings.isAllowTestsInSourcesRoot() != myAllowTestsInSourcesRoot.isSelected()) {
       return true;
     }
 
-    if (settings.isEnableHotUi() != myEnableHotUiCheckBox.isSelected()) {
+    if (!Objects.equals(settings.getFontPackages(), myFontPackagesTextArea.getText())) {
       return true;
     }
 
-    //noinspection RedundantIfStatement
-    if (settings.showAllRunConfigurationsInContext() != myShowAllRunConfigurationsInContextCheckBox.isSelected()) {
+    if (settings.isFilePathLoggingEnabled() != myEnableFilePathLogging.isSelected()) {
       return true;
     }
 
-    return false;
+    return settings.isEnableJcefBrowser() != myEnableJcefBrowserCheckBox.isSelected();
   }
 
   @Override
   public void apply() throws ConfigurationException {
-    // Bazel workspaces do not specify a sdk path so we do not need to update the sdk path if using
-    // a bazel workspace.
-    if (!workspaceCache.isBazel()) {
-      final String errorMessage = FlutterSdkUtil.getErrorMessageIfWrongSdkRootPath(getSdkPathText());
-      if (errorMessage != null) {
-        throw new ConfigurationException(errorMessage);
-      }
-
-      final String sdkHomePath = getSdkPathText();
-      if (FlutterSdkUtil.isFlutterSdkHome(sdkHomePath)) {
-        ApplicationManager.getApplication().runWriteAction(() -> {
-          FlutterSdkUtil.setFlutterSdkPath(myProject, sdkHomePath);
-          FlutterSdkUtil.enableDartSdk(myProject);
-        });
-      }
+    final String errorMessage = FlutterSdkUtil.getErrorMessageIfWrongSdkRootPath(getSdkPathText());
+    if (errorMessage != null) {
+      throw new ConfigurationException(errorMessage);
     }
 
-    FlutterInitializer.setCanReportAnalytics(myReportUsageInformationCheckBox.isSelected());
+    final String sdkHomePath = getSdkPathText();
+    if (FlutterSdkUtil.isFlutterSdkHome(sdkHomePath)) {
+      OpenApiUtils.safeRunWriteAction(() -> {
+        FlutterSdkUtil.setFlutterSdkPath(myProject, sdkHomePath);
+        FlutterSdkUtil.enableDartSdk(myProject);
+      });
+    }
 
     final FlutterSettings settings = FlutterSettings.getInstance();
+    final String oldFontPackages = settings.getFontPackages();
     settings.setReloadOnSave(myHotReloadOnSaveCheckBox.isSelected());
     settings.setFormatCodeOnSave(myFormatCodeOnSaveCheckBox.isSelected());
     settings.setOrganizeImportsOnSave(myOrganizeImportsOnSaveCheckBox.isSelected());
@@ -257,35 +265,24 @@ public class FlutterSettingsConfigurable implements SearchableConfigurable {
     settings.setShowBuildMethodGuides(myShowBuildMethodGuides.isSelected());
     settings.setShowClosingLabels(myShowClosingLabels.isSelected());
     settings.setShowStructuredErrors(myShowStructuredErrors.isSelected());
+    settings.setIncludeAllStackTraces(myIncludeAllStackTraces.isSelected());
     settings.setOpenInspectorOnAppLaunch(myOpenInspectorOnAppLaunchCheckBox.isSelected());
-    settings.setDisableTrackWidgetCreation(myDisableTrackWidgetCreationCheckBox.isSelected());
+    settings.setPerserveLogsDuringHotReloadAndRestart(myEnableLogsPreserveAfterHotReloadOrRestart.isSelected());
     settings.setVerboseLogging(myEnableVerboseLoggingCheckBox.isSelected());
-    settings.setSyncingAndroidLibraries(mySyncAndroidLibrariesCheckBox.isSelected());
-    settings.setEnableHotUi(myEnableHotUiCheckBox.isSelected());
-    settings.setShowAllRunConfigurationsInContext(myShowAllRunConfigurationsInContextCheckBox.isSelected());
+    settings.setAllowTestsInSourcesRoot(myAllowTestsInSourcesRoot.isSelected());
+    settings.setFontPackages(myFontPackagesTextArea.getText());
+    settings.setEnableJcefBrowser(myEnableJcefBrowserCheckBox.isSelected());
+    settings.setFilePathLoggingEnabled(myEnableFilePathLogging.isSelected());
 
     reset(); // because we rely on remembering initial state
+    checkFontPackages(settings.getFontPackages(), oldFontPackages);
   }
 
+  // Reset is run when opening settings, clicking cancel, or right after apply.
   @Override
   public void reset() {
     final FlutterSdk sdk = FlutterSdk.getFlutterSdk(myProject);
-    final String path = sdk != null ? sdk.getHomePath() : "";
-
-    // Set this after populating the combo box to display correctly when the Flutter SDK is unset.
-    // (This can happen if the user changed the Dart SDK.)
-    try {
-      ignoringSdkChanges = true;
-      FlutterSdkUtil.addKnownSDKPathsToCombo(mySdkCombo.getComboBox());
-      mySdkCombo.getComboBox().getEditor().setItem(FileUtil.toSystemDependentName(path));
-    }
-    finally {
-      ignoringSdkChanges = false;
-    }
-
-    onVersionChanged();
-
-    myReportUsageInformationCheckBox.setSelected(FlutterInitializer.getCanReportAnalytics());
+    resetSdkSelection(sdk);
 
     final FlutterSettings settings = FlutterSettings.getInstance();
     myHotReloadOnSaveCheckBox.setSelected(settings.isReloadOnSave());
@@ -293,35 +290,67 @@ public class FlutterSettingsConfigurable implements SearchableConfigurable {
     myOrganizeImportsOnSaveCheckBox.setSelected(settings.isOrganizeImportsOnSave());
 
     myShowBuildMethodGuides.setSelected(settings.isShowBuildMethodGuides());
-
     myShowClosingLabels.setSelected(settings.isShowClosingLabels());
 
     myShowStructuredErrors.setSelected(settings.isShowStructuredErrors());
+    myIncludeAllStackTraces.setSelected(settings.isIncludeAllStackTraces());
     myOpenInspectorOnAppLaunchCheckBox.setSelected(settings.isOpenInspectorOnAppLaunch());
-    myDisableTrackWidgetCreationCheckBox.setSelected(settings.isDisableTrackWidgetCreation());
+    myEnableLogsPreserveAfterHotReloadOrRestart.setSelected(settings.isPerserveLogsDuringHotReloadAndRestart());
     myEnableVerboseLoggingCheckBox.setSelected(settings.isVerboseLogging());
-    mySyncAndroidLibrariesCheckBox.setSelected(settings.isSyncingAndroidLibraries());
 
-    myEnableHotUiCheckBox.setSelected(settings.isEnableHotUi());
-
+    myAllowTestsInSourcesRoot.setSelected(settings.isAllowTestsInSourcesRoot());
     myOrganizeImportsOnSaveCheckBox.setEnabled(myFormatCodeOnSaveCheckBox.isSelected());
+    myIncludeAllStackTraces.setEnabled(myShowStructuredErrors.isSelected());
 
-    myShowAllRunConfigurationsInContextCheckBox.setSelected(settings.showAllRunConfigurationsInContext());
+    myEnableJcefBrowserCheckBox.setSelected(settings.isEnableJcefBrowser());
+    myFontPackagesTextArea.setText(settings.getFontPackages());
+    myEnableFilePathLogging.setSelected(settings.isFilePathLoggingEnabled());
+  }
+
+  private void resetSdkSelection(@Nullable FlutterSdk sdk) {
+    final String path = sdk != null ? sdk.getHomePath() : "";
+
+    try {
+      ignoringSdkChanges = true;
+      mySdkCombo.getEditor().setItem(FileUtil.toSystemDependentName(path));
+      FlutterSdkUtil.addKnownSDKPathsToCombo(mySdkCombo);
+    }
+    finally {
+      ignoringSdkChanges = false;
+    }
+
+    // This is to show the version below the SDK selection box.
+    onVersionChanged();
+    updatePubGetOnSdkChange(sdk);
+  }
+
+  private void updatePubGetOnSdkChange(@Nullable FlutterSdk sdk) {
+    if (sdk == null) {
+      previousSdkVersion = null;
+      return;
+    }
+
+    if (previousSdkVersion != null && previousSdkVersion.compareTo(sdk.getVersion()) != 0) {
+      final List<PubRoot> roots = PubRoots.forProject(myProject);
+      OpenApiUtils.safeInvokeLater(() -> {
+        for (PubRoot root : roots) {
+          sdk.startPubGet(root, myProject);
+        }
+      });
+      previousSdkVersion = sdk.getVersion();
+    }
+  }
+
+  private void cancelActiveVersionProcess() {
+    final Process previous = activeVersionProcess.getAndSet(null);
+    if (previous != null && previous.isAlive()) {
+      previous.destroy();
+    }
   }
 
   private void onVersionChanged() {
-    final Workspace workspace = workspaceCache.get();
-    if (workspaceCache.isBazel()) {
-      // The workspace is not null if workspaceCache.isBazel() is true.
-      assert (workspace != null);
-
-      mySdkCombo.setEnabled(false);
-      mySdkCombo.getComboBox().getEditor()
-        .setItem(workspace.getRoot().getPath() + '/' + workspace.getSdkHome() + " <set by bazel project>");
-    }
-    else {
-      mySdkCombo.setEnabled(true);
-    }
+    mySdkCombo.setEnabled(true);
+    cancelActiveVersionProcess();
 
     final FlutterSdk sdk = FlutterSdk.forPath(getSdkPathText());
     if (sdk == null) {
@@ -332,19 +361,36 @@ public class FlutterSettingsConfigurable implements SearchableConfigurable {
     }
 
     final ModalityState modalityState = ModalityState.current();
+    ApplicationManager.getApplication().executeOnPooledThread(() -> {
+      // "flutter --version" can take a long time on a slow network.
+      final Process process = sdk.flutterVersion().start();
+      if (process == null) {
+        return;
+      }
+      activeVersionProcess.set(process);
 
-    final boolean trackWidgetCreationRecommended = sdk.getVersion().isTrackWidgetCreationRecommended();
-    myDisableTrackWidgetCreationCheckBox.setVisible(trackWidgetCreationRecommended);
+      final ColoredProcessHandler handler = new ColoredProcessHandler(process, null);
+      final CapturingProcessAdapter listener = new CapturingProcessAdapter();
+      handler.addProcessListener(listener);
+      handler.startNotify();
+      handler.waitFor();
 
-    // TODO(devoncarew): Switch this to expecting json output.
-    sdk.flutterVersion().start((ProcessOutput output) -> {
-      final String fullVersionText = output.getStdout();
-      fullVersionString = fullVersionText;
-
-      final String[] lines = StringUtil.splitByLines(fullVersionText);
+      final ProcessOutput output = listener.getOutput();
+      final String stdout = output.getStdout();
+      final String[] lines = StringUtil.splitByLines(stdout);
       final String singleLineVersion = lines.length > 0 ? lines[0] : "";
-      ApplicationManager.getApplication().invokeLater(() -> updateVersionTextIfCurrent(sdk, singleLineVersion), modalityState);
-    }, null);
+
+      OpenApiUtils.safeInvokeLater(() -> {
+        activeVersionProcess.compareAndSet(process, null);
+        fullVersionString = stdout;
+        updateVersionTextIfCurrent(sdk, singleLineVersion);
+      }, modalityState);
+    });
+  }
+
+  @Override
+  public void disposeUIResources() {
+    cancelActiveVersionProcess();
   }
 
   /***
@@ -363,11 +409,6 @@ public class FlutterSettingsConfigurable implements SearchableConfigurable {
   }
 
   @Override
-  public void disposeUIResources() {
-
-  }
-
-  @Override
   @Nls
   public String getDisplayName() {
     return FLUTTER_SETTINGS_PAGE_NAME;
@@ -381,7 +422,33 @@ public class FlutterSettingsConfigurable implements SearchableConfigurable {
 
   @NotNull
   private String getSdkPathText() {
-    return FileUtilRt.toSystemIndependentName(mySdkCombo.getComboBox().getEditor().getItem().toString().trim());
+    final Object item = mySdkCombo.getEditor().getItem();
+    return item != null ? FileUtilRt.toSystemIndependentName(item.toString().trim()) : "";
+  }
+
+  private void checkFontPackages(String value, String previous) {
+    if (value != null) {
+      final String[] packages = value.split(FontPreviewProcessor.PACKAGE_SEPARATORS);
+      for (String name : packages) {
+        final String message = FontPreviewProcessor.UNSUPPORTED_PACKAGES.get(name.trim());
+        if (message != null) {
+          displayNotification(message);
+        }
+      }
+      if (!value.equals(previous)) {
+        FontPreviewProcessor.reanalyze(myProject);
+      }
+    }
+  }
+
+  private void displayNotification(String message) {
+    final Notification notification = new Notification(
+      FlutterMessages.FLUTTER_LOGGING_NOTIFICATION_GROUP_ID,
+      FlutterBundle.message("icon.preview.disallow.package.title"),
+      message,
+      NotificationType.INFORMATION);
+    notification.setIcon(FlutterIcons.Flutter);
+    Notifications.Bus.notify(notification, myProject);
   }
 
   public static void openFlutterSettings(@NotNull final Project project) {

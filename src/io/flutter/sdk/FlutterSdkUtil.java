@@ -6,13 +6,15 @@
 package io.flutter.sdk;
 
 import com.google.common.annotations.VisibleForTesting;
+import com.google.gson.JsonArray;
+import com.google.gson.JsonElement;
+import com.google.gson.JsonObject;
+import com.google.gson.JsonParser;
 import com.intellij.execution.ExecutionException;
 import com.intellij.ide.util.PropertiesComponent;
 import com.intellij.openapi.application.ApplicationManager;
 import com.intellij.openapi.application.ApplicationNamesInfo;
-import com.intellij.openapi.diagnostic.Logger;
 import com.intellij.openapi.module.Module;
-import com.intellij.openapi.module.ModuleManager;
 import com.intellij.openapi.project.Project;
 import com.intellij.openapi.project.ProjectManager;
 import com.intellij.openapi.util.SystemInfo;
@@ -28,16 +30,21 @@ import io.flutter.dart.DartPlugin;
 import io.flutter.pub.PubRoot;
 import io.flutter.pub.PubRoots;
 import io.flutter.utils.FlutterModuleUtils;
+import io.flutter.utils.JsonUtils;
+import io.flutter.utils.OpenApiUtils;
 import io.flutter.utils.SystemUtils;
 import org.jetbrains.annotations.NotNull;
 import org.jetbrains.annotations.Nullable;
 
-import javax.swing.*;
+import javax.swing.DefaultComboBoxModel;
+import javax.swing.JComboBox;
 import java.io.File;
 import java.io.IOException;
-import java.util.Arrays;
+import java.net.URI;
+import java.net.URISyntaxException;
 import java.util.HashSet;
 import java.util.LinkedHashSet;
+import java.util.List;
 import java.util.Set;
 
 public class FlutterSdkUtil {
@@ -47,15 +54,15 @@ public class FlutterSdkUtil {
   public static final String FLUTTER_HOST_ENV = "FLUTTER_HOST";
 
   private static final String FLUTTER_SDK_KNOWN_PATHS = "FLUTTER_SDK_KNOWN_PATHS";
-  private static final Logger LOG = Logger.getInstance(FlutterSdkUtil.class);
+  private static final String FLUTTER_SNAP_SDK_PATH = "/snap/flutter/common/flutter";
 
-  private FlutterSdkUtil() {
+  public FlutterSdkUtil() {
   }
 
   /**
    * Return the environment variable value to use when shelling out to the Flutter command-line tool.
    */
-  public static String getFlutterHostEnvValue() {
+  public String getFlutterHostEnvValue() {
     final String clientId = ApplicationNamesInfo.getInstance().getFullProductName().replaceAll(" ", "-");
     final String existingVar = java.lang.System.getenv(FLUTTER_HOST_ENV);
     return existingVar == null ? clientId : (existingVar + ":" + clientId);
@@ -75,9 +82,9 @@ public class FlutterSdkUtil {
     final PropertiesComponent props = PropertiesComponent.getInstance();
 
     // Add the existing known paths.
-    final String[] oldPaths = props.getValues(propertyKey);
+    final List<String> oldPaths = props.getList(propertyKey);
     if (oldPaths != null) {
-      allPaths.addAll(Arrays.asList(oldPaths));
+      allPaths.addAll(oldPaths);
     }
 
     // Store the values back.
@@ -93,26 +100,51 @@ public class FlutterSdkUtil {
    * Adds the current path and other known paths to the combo, most recently used first.
    */
   public static void addKnownSDKPathsToCombo(@NotNull JComboBox combo) {
-    final Set<String> pathsToShow = new LinkedHashSet<>();
-
-    final String currentPath = combo.getEditor().getItem().toString().trim();
+    // First, get the current path from the combo box on the EDT.
+    final Object initialItem = combo.getEditor().getItem();
+    final String currentPath = initialItem != null ? initialItem.toString().trim() : "";
+    final Set<String> initialPaths = new LinkedHashSet<>();
     if (!currentPath.isEmpty()) {
-      pathsToShow.add(currentPath);
+      initialPaths.add(currentPath);
     }
 
-    final String[] knownPaths = getKnownFlutterSdkPaths();
-    for (String path : knownPaths) {
-      if (FlutterSdk.forPath(path) != null) {
-        pathsToShow.add(FileUtil.toSystemDependentName(path));
+    // Now, run the slow operation (finding valid SDK paths) on a background thread.
+    OpenApiUtils.safeExecuteOnPooledThread(() -> {
+      final String[] knownPaths = getKnownFlutterSdkPaths();
+      final Set<String> validPaths = new LinkedHashSet<>();
+      for (String path : knownPaths) {
+        // The call to forPath() is on a background thread.
+        if (FlutterSdk.forPath(path) != null) {
+          validPaths.add(FileUtil.toSystemDependentName(path));
+        }
       }
-    }
 
-    //noinspection unchecked
-    combo.setModel(new DefaultComboBoxModel(ArrayUtil.toStringArray(pathsToShow)));
+      // After the slow operation is complete, switch back to the EDT to update the UI.
+      OpenApiUtils.safeInvokeLater(() -> {
+        // This code runs on the EDT.
+        final Object currentEditorItem = combo.getEditor().getItem();
+        final String activePath = currentEditorItem != null ? currentEditorItem.toString().trim() : "";
 
-    if (combo.getSelectedIndex() == -1 && combo.getItemCount() > 0) {
-      combo.setSelectedIndex(0);
-    }
+        final Set<String> pathsToShow = new LinkedHashSet<>();
+        if (!activePath.isEmpty()) {
+          pathsToShow.add(activePath);
+        }
+        pathsToShow.addAll(initialPaths);
+        pathsToShow.addAll(validPaths);
+
+        // Update the combo box model with the new paths.
+        //noinspection unchecked
+        combo.setModel(new DefaultComboBoxModel<>(ArrayUtil.toStringArray(pathsToShow)));
+
+        // Preserve active editor content or select the first item if none is selected.
+        if (!activePath.isEmpty()) {
+          combo.getEditor().setItem(activePath);
+        }
+        else if (combo.getSelectedIndex() == -1 && combo.getItemCount() > 0) {
+          combo.setSelectedIndex(0);
+        }
+      });
+    });
   }
 
   @NotNull
@@ -128,15 +160,21 @@ public class FlutterSdkUtil {
     }
 
     // use the list of paths they've entered in the past
-    final String[] knownPaths = PropertiesComponent.getInstance().getValues(FLUTTER_SDK_KNOWN_PATHS);
+    final List<String> knownPaths = PropertiesComponent.getInstance().getList(FLUTTER_SDK_KNOWN_PATHS);
     if (knownPaths != null) {
-      paths.addAll(Arrays.asList(knownPaths));
+      paths.addAll(knownPaths);
     }
 
     // search the user's path
     final String fromUserPath = locateSdkFromPath();
     if (fromUserPath != null) {
       paths.add(fromUserPath);
+    }
+
+    // Add the snap SDK path if it exists; note that this path is standard on all Linux platforms.
+    final File snapSdkPath = new File(System.getenv("HOME") + FLUTTER_SNAP_SDK_PATH);
+    if (snapSdkPath.exists()) {
+      paths.add(snapSdkPath.getAbsolutePath());
     }
 
     return paths.toArray(new String[0]);
@@ -186,16 +224,7 @@ public class FlutterSdkUtil {
     final File dartLibFolder = new File(path + "/bin/cache/dart-sdk/lib");
     return flutterPubspecFile.isFile() && flutterToolFile.isFile() && !dartLibFolder.isDirectory();
   }
-
-  /**
-   * Checks the workspace for any open Flutter projects.
-   *
-   * @return true if an open Flutter project is found
-   */
-  public static boolean hasFlutterModules() {
-    return Arrays.stream(ProjectManager.getInstance().getOpenProjects()).anyMatch(FlutterModuleUtils::hasFlutterModule);
-  }
-
+  
   public static boolean hasFlutterModules(@NotNull Project project) {
     return FlutterModuleUtils.hasFlutterModule(project);
   }
@@ -218,7 +247,7 @@ public class FlutterSdkUtil {
   public static void setFlutterSdkPath(@NotNull final Project project, @NotNull final String flutterSdkPath) {
     // In reality this method sets Dart SDK (that is inside the Flutter SDK).
     final String dartSdk = flutterSdkPath + "/bin/cache/dart-sdk";
-    ApplicationManager.getApplication().runWriteAction(() -> DartPlugin.ensureDartSdkConfigured(project, dartSdk));
+    OpenApiUtils.safeRunWriteAction(() -> DartPlugin.ensureDartSdkConfigured(project, dartSdk));
 
     // Checking for updates doesn't make sense since the channels don't correspond to Flutter...
     DartSdkUpdateOption.setDartSdkUpdateOption(DartSdkUpdateOption.DoNotCheck);
@@ -233,36 +262,92 @@ public class FlutterSdkUtil {
   // TODO(devoncarew): The Dart plugin supports specifying individual modules in the settings page.
 
   /**
-   * Do a best-effort basis to enable Dart support for the given project.
+   * Enable Dart support for the given project.
    */
   public static void enableDartSdk(@NotNull final Project project) {
-    final Module[] modules = ModuleManager.getInstance(project).getModules();
-    if (modules.length == 1) {
-      DartPlugin.enableDartSdk(modules[0]);
+    for (Module module : OpenApiUtils.getModules(project)) {
+      if (!PubRoots.forModule(module).isEmpty()) {
+        DartPlugin.enableDartSdk(module);
+      }
     }
   }
 
   /**
-   * Parse any .packages file and infer the location of the Flutter SDK from that.
+   * Parse packages meta-data file and infer the location of the Flutter SDK from that.
    */
   @Nullable
   public static String guessFlutterSdkFromPackagesFile(@NotNull Module module) {
-    for (PubRoot pubRoot : PubRoots.forModule(module)) {
-      final VirtualFile packagesFile = pubRoot.getPackagesFile();
-      if (packagesFile == null) {
-        continue;
-      }
-
-      // parse it
-      try {
-        final String contents = new String(packagesFile.contentsToByteArray(true /* cache contents */));
-        return parseFlutterSdkPath(contents);
-      }
-      catch (IOException ignored) {
+    // First, look for .dart_tool/package_config.json
+    final JsonArray packages = getPackagesFromPackageConfig(PubRoots.forModule(module));
+    for (int i = 0; i < packages.size(); i++) {
+      final JsonObject pack = packages.get(i).getAsJsonObject();
+      if ("flutter".equals(JsonUtils.getStringMember(pack, "name"))) {
+        final String uri = JsonUtils.getStringMember(pack, "rootUri");
+        if (uri == null) {
+          continue;
+        }
+        final String path = extractSdkPathFromUri(uri, false);
+        if (path == null) {
+          continue;
+        }
+        return path;
       }
     }
 
     return null;
+  }
+
+  @Nullable
+  public static String getPathToCupertinoIconsPackage(@NotNull Project project) {
+    //noinspection ConstantConditions
+    if (ApplicationManager.getApplication().isUnitTestMode()) {
+      // TODO(messick): Configure the test framework to have proper pub data so we don't need this.
+      return "testData/sdk";
+    }
+    final JsonArray packages = getPackagesFromPackageConfig(PubRoots.forProject(project));
+    for (int i = 0; i < packages.size(); i++) {
+      final JsonObject pack = packages.get(i).getAsJsonObject();
+      if ("cupertino_icons".equals(JsonUtils.getStringMember(pack, "name"))) {
+        final String uri = JsonUtils.getStringMember(pack, "rootUri");
+        if (uri == null) {
+          continue;
+        }
+        try {
+          return new URI(uri).getPath();
+        }
+        catch (URISyntaxException ignored) {
+        }
+      }
+    }
+    return null;
+  }
+
+  private static JsonArray getPackagesFromPackageConfig(@NotNull List<PubRoot> pubRoots) {
+    final JsonArray entries = new JsonArray();
+    for (PubRoot pubRoot : pubRoots) {
+      final VirtualFile configFile = pubRoot.getPackageConfigFile();
+      if (configFile == null) {
+        continue;
+      }
+      // parse it
+      try {
+        final String contents = new String(configFile.contentsToByteArray(true /* cache contents */));
+        final JsonElement element = JsonParser.parseString(contents);
+        if (element == null) {
+          continue;
+        }
+        final JsonObject json = element.getAsJsonObject();
+        if (JsonUtils.getIntMember(json, "configVersion") < 2) continue;
+        final JsonArray packages = json.getAsJsonArray("packages");
+        if (packages == null || packages.isEmpty()) {
+          continue;
+        }
+        entries.addAll(packages);
+      }
+      catch (IOException ignored) {
+      }
+    }
+    return entries;
   }
 
   @VisibleForTesting
@@ -278,20 +363,31 @@ public class FlutterSdkUtil {
       final String flutterPrefix = "flutter:";
       if (line.startsWith(flutterPrefix)) {
         final String urlString = line.substring(flutterPrefix.length());
-
-        if (urlString.startsWith("file:")) {
-          final Url url = Urls.parseEncoded(urlString);
-          if (url == null) {
-            continue;
-          }
-          final String path = url.getPath();
-          // go up three levels
-          final File file = new File(url.getPath());
-          return file.getParentFile().getParentFile().getParentFile().getPath();
+        final String path = extractSdkPathFromUri(urlString, true);
+        if (path == null) {
+          continue;
         }
+        return path;
       }
     }
+    return null;
+  }
 
+  private static String extractSdkPathFromUri(String urlString, boolean isLibIncluded) {
+    if (urlString.startsWith("file:")) {
+      final Url url = Urls.parseEncoded(urlString);
+      if (url == null) {
+        return null;
+      }
+      final String path = url.getPath();
+      // go up three levels for .packages or two for .dart_tool/package_config.json
+      File file = new File(url.getPath());
+      file = file.getParentFile().getParentFile();
+      if (isLibIncluded) {
+        file = file.getParentFile();
+      }
+      return file.getPath();
+    }
     return null;
   }
 

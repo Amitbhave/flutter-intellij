@@ -13,11 +13,13 @@ import com.intellij.execution.RunnerAndConfigurationSettings;
 import com.intellij.execution.configurations.RunConfiguration;
 import com.intellij.execution.runners.ExecutionEnvironment;
 import com.intellij.execution.runners.ExecutionEnvironmentBuilder;
+import com.intellij.openapi.actionSystem.ActionUpdateThread;
 import com.intellij.openapi.actionSystem.AnAction;
 import com.intellij.openapi.actionSystem.AnActionEvent;
 import com.intellij.openapi.project.Project;
+import com.jetbrains.lang.dart.analytics.Analytics;
+import com.jetbrains.lang.dart.analytics.AnalyticsData;
 import io.flutter.FlutterBundle;
-import io.flutter.FlutterInitializer;
 import io.flutter.run.FlutterLaunchMode;
 import io.flutter.run.LaunchState;
 import io.flutter.run.SdkFields;
@@ -25,23 +27,19 @@ import io.flutter.run.SdkRunConfig;
 import org.jetbrains.annotations.NotNull;
 import org.jetbrains.annotations.Nullable;
 
-import javax.swing.*;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Objects;
 
 public abstract class RunFlutterAction extends AnAction {
   private final @NotNull String myDetailedTextKey;
   private final @NotNull FlutterLaunchMode myLaunchMode;
   private final @NotNull String myExecutorId;
 
-  public RunFlutterAction(@NotNull String text,
-                          @NotNull String detailedTextKey,
-                          @NotNull String description,
-                          @NotNull Icon icon,
-                          @NotNull FlutterLaunchMode launchMode,
-                          @NotNull String executorId) {
-    super(text, description, icon);
-
+  public RunFlutterAction(
+    @NotNull String detailedTextKey,
+    @NotNull FlutterLaunchMode launchMode,
+    @NotNull String executorId) {
     myDetailedTextKey = detailedTextKey;
     myLaunchMode = launchMode;
     myExecutorId = executorId;
@@ -50,8 +48,6 @@ public abstract class RunFlutterAction extends AnAction {
   @Override
   public void actionPerformed(@NotNull AnActionEvent e) {
     // NOTE: When making changes here, consider making similar changes to ConnectAndroidDebuggerAction.
-    FlutterInitializer.sendAnalyticsAction(this);
-
     final RunnerAndConfigurationSettings settings = getRunConfigSettings(e);
     if (settings == null) {
       return;
@@ -64,6 +60,7 @@ public abstract class RunFlutterAction extends AnAction {
     }
 
     final SdkRunConfig sdkRunConfig = (SdkRunConfig)configuration.clone();
+    assert sdkRunConfig != null;
     final SdkFields fields = sdkRunConfig.getFields();
     final String additionalArgs = fields.getAdditionalArgs();
 
@@ -105,6 +102,8 @@ public abstract class RunFlutterAction extends AnAction {
     FlutterLaunchMode.addToEnvironment(env, myLaunchMode);
 
     ProgramRunnerUtil.executeConfiguration(env, false, true);
+
+    Analytics.report(AnalyticsData.forAction(this, e));
   }
 
   @Override
@@ -122,8 +121,12 @@ public abstract class RunFlutterAction extends AnAction {
   private static boolean shouldEnable(@Nullable AnActionEvent e) {
     final RunnerAndConfigurationSettings settings = getRunConfigSettings(e);
     final RunConfiguration config = settings == null ? null : settings.getConfiguration();
-    // TODO(pq): add support for Bazel.
     return config instanceof SdkRunConfig && LaunchState.getRunningAppProcess((SdkRunConfig)config) == null;
+  }
+
+  @Override
+  public @NotNull ActionUpdateThread getActionUpdateThread() {
+    return ActionUpdateThread.BGT;
   }
 
   @Nullable
@@ -151,7 +154,8 @@ public abstract class RunFlutterAction extends AnAction {
 
   @Nullable
   public static Executor getExecutor(@NotNull String executorId) {
-    for (Executor executor : Executor.EXECUTOR_EXTENSION_NAME.getExtensions()) {
+    for (Executor executor : Objects.requireNonNull(Executor.EXECUTOR_EXTENSION_NAME.getExtensions())) {
+      assert executor != null;
       if (executorId.equals(executor.getId())) {
         return executor;
       }

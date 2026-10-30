@@ -27,6 +27,10 @@ public class FlutterRunNotifications {
       FlutterMessages.FLUTTER_NOTIFICATION_GROUP_ID,
       NotificationDisplayType.BALLOON,
       false);
+    NotificationsConfiguration.getNotificationsConfiguration().register(
+      FlutterMessages.FLUTTER_LOGGING_NOTIFICATION_GROUP_ID,
+      NotificationDisplayType.BALLOON,
+      true);
 
     final FlutterRunNotifications notifications = new FlutterRunNotifications(project);
 
@@ -45,6 +49,9 @@ public class FlutterRunNotifications {
   }
 
   private void checkForDisplayFirstReload() {
+    if (myProject.isDisposed()) {
+      return;
+    }
     final PropertiesComponent properties = PropertiesComponent.getInstance(myProject);
 
     final boolean alreadyRun = properties.getBoolean(RELOAD_ALREADY_RUN);
@@ -57,14 +64,14 @@ public class FlutterRunNotifications {
         FlutterBundle.message("flutter.reload.firstRun.content"),
         NotificationType.INFORMATION);
       notification.setIcon(FlutterIcons.HotReload);
-      notification.addAction(new AnAction("Learn more") {
+      notification.addAction(new AnAction("Learn More") {
         @Override
         public void actionPerformed(@NotNull AnActionEvent event) {
           BrowserUtil.browse(FlutterBundle.message("flutter.reload.firstRun.url"));
           notification.expire();
         }
       });
-      Notifications.Bus.notify(notification);
+      Notifications.Bus.notify(notification, myProject);
     }
   }
 }

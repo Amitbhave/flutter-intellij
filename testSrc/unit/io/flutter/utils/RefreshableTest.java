@@ -6,6 +6,7 @@
 package io.flutter.utils;
 
 import com.google.common.collect.ImmutableList;
+import org.hamcrest.MatcherAssert;
 import org.jetbrains.annotations.NotNull;
 import org.junit.Before;
 import org.junit.Test;
@@ -181,7 +182,7 @@ public class RefreshableTest {
   @Test
   public void refreshShouldCancelRunningTaskWhenNewTaskIsSubmitted() throws Exception {
     // Create a task that will block until we say to finish.
-    final FutureTask startedFirstTask = new FutureTask<>(() -> null);
+    final FutureTask<?> startedFirstTask = new FutureTask<>(() -> null);
     final FutureTask<String> dependency = new FutureTask<>(() -> "first task");
 
     final AtomicReference<Refreshable.Request> firstRequest = new AtomicReference<>();
@@ -285,7 +286,7 @@ public class RefreshableTest {
 
     SwingUtilities.invokeAndWait(() -> {
       SwingUtilities.invokeLater(() -> {
-        // Need to lose race with background tasks's call to reschedule(),
+        // Need to lose race with background task's call to reschedule(),
         // But win the race to publish().
         // So, schedule Swing event now, but make it slower.
         // (No suitable semaphore for this one.)
@@ -327,7 +328,8 @@ public class RefreshableTest {
       if (!s.tryAcquire(1, TimeUnit.SECONDS)) {
         log(error);
       }
-    } catch (InterruptedException e) {
+    }
+    catch (InterruptedException e) {
       log(error + " (interrupted)");
     }
   }
@@ -361,7 +363,7 @@ public class RefreshableTest {
   }
 
   private void checkLog(String... expectedEntries) {
-    assertThat("logEntries entries are different", getLogEntries(), is(ImmutableList.copyOf(expectedEntries)));
+    MatcherAssert.assertThat("logEntries entries are different", getLogEntries(), is(ImmutableList.copyOf(expectedEntries)));
     logEntries.clear();
   }
 }

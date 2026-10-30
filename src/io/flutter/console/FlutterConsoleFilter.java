@@ -11,20 +11,28 @@ import com.intellij.execution.configurations.GeneralCommandLine;
 import com.intellij.execution.filters.Filter;
 import com.intellij.execution.filters.HyperlinkInfo;
 import com.intellij.execution.filters.OpenFileHyperlinkInfo;
-import com.intellij.execution.process.OSProcessHandler;
-import com.intellij.execution.process.ProcessAdapter;
+import com.intellij.execution.process.ColoredProcessHandler;
 import com.intellij.execution.process.ProcessEvent;
+import com.intellij.openapi.editor.markup.EffectType;
+import com.intellij.openapi.editor.markup.TextAttributes;
 import com.intellij.openapi.module.Module;
 import com.intellij.openapi.project.Project;
-import com.intellij.openapi.roots.ModuleRootManager;
 import com.intellij.openapi.ui.Messages;
 import com.intellij.openapi.vfs.LocalFileSystem;
 import com.intellij.openapi.vfs.VirtualFile;
+import com.intellij.util.ui.UIUtil;
 import io.flutter.FlutterMessages;
 import io.flutter.FlutterUtils;
 import io.flutter.sdk.FlutterSdk;
+import io.flutter.utils.OpenApiUtils;
+import io.flutter.utils.ProcessAdapter;
 import org.jetbrains.annotations.NotNull;
 import org.jetbrains.annotations.Nullable;
+
+import java.awt.Font;
+import java.util.Objects;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 /**
  * The FlutterConsoleFilter handles link detection in consoles for:
@@ -35,22 +43,22 @@ import org.jetbrains.annotations.Nullable;
  */
 public class FlutterConsoleFilter implements Filter {
   private static class OpenExternalFileHyperlink implements HyperlinkInfo {
-    private final String myPath;
+    private final @NotNull String myPath;
 
-    OpenExternalFileHyperlink(VirtualFile file) {
+    OpenExternalFileHyperlink(@NotNull VirtualFile file) {
       myPath = file.getPath();
     }
 
     @Override
-    public void navigate(Project project) {
+    public void navigate(@NotNull Project project) {
       try {
         final GeneralCommandLine cmd = new GeneralCommandLine().withExePath("open").withParameters(myPath);
-        final OSProcessHandler handler = new OSProcessHandler(cmd);
+        final ColoredProcessHandler handler = new ColoredProcessHandler(cmd);
         handler.addProcessListener(new ProcessAdapter() {
           @Override
           public void processTerminated(@NotNull final ProcessEvent event) {
             if (event.getExitCode() != 0) {
-              FlutterMessages.showError("Error Opening ", myPath);
+              FlutterMessages.showError("Error Opening ", myPath, project);
             }
           }
         });
@@ -59,7 +67,8 @@ public class FlutterConsoleFilter implements Filter {
       catch (ExecutionException e) {
         FlutterMessages.showError(
           "Error Opening External File",
-          "Exception: " + e.getMessage());
+          "Exception: " + e.getMessage(),
+          project);
       }
     }
   }
@@ -78,43 +87,46 @@ public class FlutterConsoleFilter implements Filter {
 
     // We require the pathPart reference to be a file reference, otherwise we'd match things like
     // "Build: Running build completed, took 191ms".
-    if (pathPart.indexOf('.') == -1) {
+    if (pathPart == null || pathPart.indexOf('.') == -1) {
       return null;
     }
 
-    final VirtualFile[] roots = ModuleRootManager.getInstance(module).getContentRoots();
+    final VirtualFile[] roots = OpenApiUtils.getContentRoots(module);
     for (VirtualFile root : roots) {
-      if (!pathPart.isEmpty()) {
-        final String baseDirPath = root.getPath();
-        final String path = baseDirPath + "/" + pathPart;
-        VirtualFile file = findFile(path);
-        if (file == null) {
-          // check example dir too
-          // TODO(pq): remove when `example` is a content root: https://github.com/flutter/flutter-intellij/issues/2519
-          final String exampleDirRelativePath = baseDirPath + "/example/" + pathPart;
-          file = findFile(exampleDirRelativePath);
-        }
-        if (file != null) {
-          return file;
-        }
+      if (root == null) continue;
+      final String baseDirPath = root.getPath();
+      final String path = baseDirPath + "/" + pathPart;
+      VirtualFile file = findFile(path);
+      if (file == null) {
+        // check example dir too
+        // TODO(pq): remove when `example` is a content root: https://github.com/flutter/flutter-intellij/issues/2519
+        final String exampleDirRelativePath = baseDirPath + "/example/" + pathPart;
+        file = findFile(exampleDirRelativePath);
+      }
+      if (file != null) {
+        return file;
       }
     }
 
     return null;
   }
 
-  private static VirtualFile findFile(final String path) {
+  private static @Nullable VirtualFile findFile(final @NotNull String path) {
     final VirtualFile file = LocalFileSystem.getInstance().findFileByPath(path);
     return file != null && file.exists() ? file : null;
   }
 
   @Override
   @Nullable
-  public Result applyFilter(final String line, final int entireLength) {
+  public Result applyFilter(final @NotNull String line, final int entireLength) {
     if (line.startsWith("Run \"flutter doctor\" for information about installing additional components.")) {
       return getFlutterDoctorResult(line, entireLength - line.length());
     }
 
+    if (line.startsWith("Lost connection to device")) {
+      TextAttributes attr = new TextAttributes(UIUtil.getErrorForeground(), null, null, EffectType.BOXED, Font.PLAIN);
+      return new Result(entireLength - line.length(), entireLength, null, attr);
+    }
     int lineNumber = 0;
     String pathPart = line.trim();
     VirtualFile file = null;
@@ -128,10 +140,12 @@ public class FlutterConsoleFilter implements Filter {
       final String[] parts = pathPart.split(" ");
       if (parts.length > 1) {
         pathPart = parts[1];
-        file = fileAtPath(pathPart);
-        if (file != null) {
-          lineStart = entireLength - line.length() + line.indexOf(pathPart);
-          highlightLength = pathPart.length();
+        if (pathPart != null) {
+          file = fileAtPath(pathPart);
+          if (file != null) {
+            lineStart = entireLength - line.length() + line.indexOf(pathPart);
+            highlightLength = pathPart.length();
+          }
         }
       }
     }
@@ -142,12 +156,13 @@ public class FlutterConsoleFilter implements Filter {
     final String[] parts = pathPart.split(" ");
     for (String part : parts) {
       // "(lib/main.dart:49)"
-      if (part.startsWith("(") && part.endsWith(")")) {
+      if (part != null && part.startsWith("(") && part.endsWith(")")) {
         part = part.substring(1, part.length() - 1);
         final String[] split = part.split(":");
         if (split.length == 2) {
           try {
             // Reconcile line number indexing.
+            //noinspection DataFlowIssue
             lineNumber = Math.max(0, Integer.parseInt(split[1]) - 1);
           }
           catch (NumberFormatException e) {
@@ -158,10 +173,11 @@ public class FlutterConsoleFilter implements Filter {
           highlightLength = pathPart.length();
           break;
         }
-        else if (split.length == 4 && split[0].equals("file")) {
+        else if (split.length == 4 && Objects.equals(split[0], "file")) {
           // part = file:///Users/user/AndroidStudioProjects/flutter_app/test/widget_test.dart:23:18
           try {
             // Reconcile line number indexing.
+            //noinspection DataFlowIssue
             lineNumber = Math.max(0, Integer.parseInt(split[2]) - 1);
           }
           catch (NumberFormatException e) {
@@ -175,6 +191,37 @@ public class FlutterConsoleFilter implements Filter {
           highlightLength = part.length();
           break;
         }
+      }
+    }
+
+    if (lineStart < 0) {
+      // lib/registerC.dart:104:73: Error: Expected ';' after this.
+      final String filePathAndLineNumberExpr = "(^.*?):(\\d+?):\\d+?:\\s*?Error";
+      final Pattern pattern = Pattern.compile(filePathAndLineNumberExpr);
+      final Matcher matcher = pattern.matcher(line);
+      final boolean found = matcher.find();
+      if (found) {
+        final String filePathExpr = "((?:[^/]*/)*)(.*)";
+        final Pattern pathPattern = Pattern.compile(filePathExpr);
+        //noinspection DataFlowIssue
+        final Matcher pathMatcher = pathPattern.matcher(matcher.group(1));
+        if (pathMatcher.find()) {
+          final String path = pathMatcher.group(1) + pathMatcher.group(2);
+          file = fileAtPath(path);
+          if (file == null) {
+            return null;
+          }
+          //noinspection DataFlowIssue
+          lineNumber = Integer.parseInt(matcher.group(2));
+          lineStart = entireLength - line.length();
+          highlightLength = path.length();
+        }
+        else {
+          return null;
+        }
+      }
+      else {
+        return null;
       }
     }
 
@@ -194,9 +241,11 @@ public class FlutterConsoleFilter implements Filter {
     return null;
   }
 
-  private String findRelativePath(String threeSlashFileName) {
-    final VirtualFile[] roots = ModuleRootManager.getInstance(module).getContentRoots();
+  private @Nullable String findRelativePath(@Nullable String threeSlashFileName) {
+    if (threeSlashFileName == null) return null;
+    final VirtualFile[] roots = OpenApiUtils.getContentRoots(module);
     for (VirtualFile root : roots) {
+      if (root == null) continue;
       final String path = root.getPath();
       int index = threeSlashFileName.indexOf(path);
       if (index > 0) {
@@ -207,7 +256,7 @@ public class FlutterConsoleFilter implements Filter {
     return null;
   }
 
-  private static Result getFlutterDoctorResult(final String line, final int lineStart) {
+  private static @NotNull Result getFlutterDoctorResult(final @NotNull String line, final int lineStart) {
     final int commandStart = line.indexOf('"') + 1;
     final int startOffset = lineStart + commandStart;
     final int commandLength = "flutter doctor".length();
@@ -216,7 +265,7 @@ public class FlutterConsoleFilter implements Filter {
 
   private static class FlutterDoctorHyperlinkInfo implements HyperlinkInfo {
     @Override
-    public void navigate(final Project project) {
+    public void navigate(final @NotNull Project project) {
       // TODO(skybrian) analytics for clicking the link? (We do log the command.)
       final FlutterSdk sdk = FlutterSdk.getFlutterSdk(project);
       if (sdk == null) {

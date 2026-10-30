@@ -5,22 +5,61 @@
  */
 package io.flutter.actions;
 
+import com.intellij.openapi.actionSystem.ActionUpdateThread;
 import com.intellij.openapi.actionSystem.AnAction;
 import com.intellij.openapi.actionSystem.AnActionEvent;
 import com.intellij.openapi.project.Project;
-import io.flutter.FlutterInitializer;
+import com.intellij.openapi.util.NlsActions;
+import com.jetbrains.lang.dart.analytics.Analytics;
+import com.jetbrains.lang.dart.analytics.AnalyticsData;
+import icons.FlutterIcons;
 import io.flutter.run.daemon.DeviceService;
+import org.jetbrains.annotations.NotNull;
+import org.jetbrains.annotations.Nullable;
+
+import javax.swing.Icon;
 
 public class RestartFlutterDaemonAction extends AnAction {
-  @Override
-  public void actionPerformed(AnActionEvent event) {
-    FlutterInitializer.sendAnalyticsAction(this);
 
+  /**
+   * Create a `RestartFlutterDaemonAction` for presentation in the device selector.
+   */
+  public static RestartFlutterDaemonAction forDeviceSelector() {
+    //noinspection DialogTitleCapitalization
+    return new RestartFlutterDaemonAction("Restart Flutter Daemon", "Restart Flutter Daemon", FlutterIcons.Flutter);
+  }
+
+  /**
+   * A default constructor, invoked by plugin.xml contributions.
+   */
+  RestartFlutterDaemonAction() {
+    super();
+  }
+
+  /**
+   * A constructor for dynamic invocation.
+   */
+  @SuppressWarnings("ActionPresentationInstantiatedInCtor")
+  private RestartFlutterDaemonAction(@Nullable @NlsActions.ActionText String text,
+                                     @Nullable @NlsActions.ActionDescription String description,
+                                     @Nullable Icon icon) {
+    super(text, description, icon);
+  }
+
+  @Override
+  public void actionPerformed(@NotNull AnActionEvent event) {
     final Project project = event.getProject();
     if (project == null) {
       return;
     }
 
     DeviceService.getInstance(project).restart();
+
+    Analytics.report(AnalyticsData.forAction(this, event));
+  }
+
+  @Override
+  public @NotNull ActionUpdateThread getActionUpdateThread() {
+    return ActionUpdateThread.BGT;
   }
 }

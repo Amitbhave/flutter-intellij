@@ -5,10 +5,12 @@
  */
 package io.flutter.run;
 
+import icons.FlutterIcons;
 import io.flutter.sdk.XcodeUtils;
 import org.jetbrains.annotations.NotNull;
 import org.jetbrains.annotations.Nullable;
 
+import javax.swing.Icon;
 import java.util.Collection;
 import java.util.Objects;
 
@@ -32,7 +34,7 @@ public class FlutterDevice {
     @Nullable String category, @Nullable String platformType, @Nullable Boolean ephemeral
   ) {
     myDeviceId = deviceId;
-    myDeviceName = deviceName;
+    myDeviceName = deviceName.replaceAll("_", " ");
     myPlatform = platform;
     myEmulator = emulator;
     myCategory = category;
@@ -48,6 +50,11 @@ public class FlutterDevice {
   @NotNull
   public String deviceName() {
     return myDeviceName;
+  }
+
+  @NotNull
+  public String withRunConfigurationName(@NotNull String runConfigurationName) {
+    return runConfigurationName + " (" + deviceName() + ")";
   }
 
   @Nullable
@@ -85,6 +92,31 @@ public class FlutterDevice {
     return myPlatform != null && (myPlatform.equals("ios") || myPlatform.startsWith("darwin"));
   }
 
+  public boolean isMobile() {
+    return myCategory != null && myCategory.equals("mobile");
+  }
+
+  public boolean isDesktop() {
+    return myCategory != null && myCategory.equals("desktop");
+  }
+
+  public boolean isWeb() {
+    return myCategory != null && (myCategory.equals("web"));
+  }
+
+  public Icon getIcon() {
+    if (isDesktop()) {
+      return FlutterIcons.Desktop;
+    }
+    else if (isWeb()) {
+      return FlutterIcons.Web;
+    }
+    // Use the mobile icon for all other devices.
+    else {
+      return FlutterIcons.Mobile;
+    }
+  }
+
   @Override
   public boolean equals(Object other) {
     //noinspection SimplifiableIfStatement
@@ -111,6 +143,7 @@ public class FlutterDevice {
   /**
    * Given a collection of devices, return a unique name for this device.
    */
+  @NotNull
   public String getUniqueName(Collection<FlutterDevice> devices) {
     for (final FlutterDevice other : devices) {
       if (other == this) {
@@ -130,7 +163,7 @@ public class FlutterDevice {
   public void bringToFront() {
     if (emulator() && isIOS()) {
       // Bring the iOS simulator to front.
-      XcodeUtils.openSimulator();
+      XcodeUtils.openSimulator(null);
     }
   }
 
@@ -141,6 +174,7 @@ public class FlutterDevice {
     return new FlutterDevice("flutter-tester", "Flutter test device", null, false);
   }
 
+  @NotNull
   public String presentationName() {
     if (category() != null) {
       return deviceName() + " (" + category() + ")";

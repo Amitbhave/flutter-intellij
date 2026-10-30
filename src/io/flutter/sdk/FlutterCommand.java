@@ -8,31 +8,44 @@ package io.flutter.sdk;
 import com.google.common.collect.ImmutableList;
 import com.intellij.execution.ExecutionException;
 import com.intellij.execution.configurations.GeneralCommandLine;
-import com.intellij.execution.process.*;
+import com.intellij.execution.process.CapturingProcessAdapter;
+import com.intellij.execution.process.ColoredProcessHandler;
+import com.intellij.execution.process.ProcessEvent;
+import com.intellij.execution.process.ProcessListener;
+import com.intellij.execution.process.ProcessOutput;
 import com.intellij.openapi.diagnostic.Logger;
 import com.intellij.openapi.module.Module;
 import com.intellij.openapi.project.Project;
 import com.intellij.openapi.util.io.FileUtil;
-import com.intellij.openapi.vfs.CharsetToolkit;
+import com.intellij.openapi.util.text.StringUtil;
 import com.intellij.openapi.vfs.VirtualFile;
 import io.flutter.FlutterBundle;
-import io.flutter.FlutterInitializer;
 import io.flutter.FlutterMessages;
 import io.flutter.android.IntelliJAndroidSdk;
 import io.flutter.console.FlutterConsoles;
 import io.flutter.dart.DartPlugin;
-import io.flutter.utils.MostlySilentOsProcessHandler;
+import com.jetbrains.lang.dart.analytics.Analytics;
+import io.flutter.logging.PluginLogger;
+import io.flutter.settings.FlutterSettings;
+import io.flutter.utils.MostlySilentColoredProcessHandler;
+import io.flutter.utils.ProcessAdapter;
 import org.jetbrains.annotations.NotNull;
 import org.jetbrains.annotations.Nullable;
 
-import java.util.*;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Path;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Set;
 import java.util.function.Consumer;
 
 /**
  * A Flutter command to run, with its arguments.
  */
 public class FlutterCommand {
-  private static final Logger LOG = Logger.getInstance(FlutterCommand.class);
+  private static final @NotNull Logger LOG = PluginLogger.createLogger(FlutterCommand.class);
 
   private static final Set<Type> pubRelatedCommands = new HashSet<>(
     Arrays.asList(Type.PUB_GET, Type.PUB_UPGRADE, Type.PUB_OUTDATED, Type.UPGRADE));
@@ -62,16 +75,61 @@ public class FlutterCommand {
   /**
    * Returns a displayable version of the command that will be run.
    */
-  public String getDisplayCommand() {
+  public @NotNull String getDisplayCommand() {
     final List<String> words = new ArrayList<>();
     words.add("flutter");
     words.addAll(type.subCommand);
     words.addAll(args);
-    return String.join(" ", words);
+    return StringUtil.join(words, " ");
+  }
+
+  /**
+   * Returns a displayable version of the command, with potential file paths redacted if path logging is disabled.
+   */
+  public String getSanitizedDisplayCommand() {
+    if (FlutterSettings.getInstance().isFilePathLoggingEnabled()) {
+      return getDisplayCommand();
+    }
+
+    final List<String> words = new ArrayList<>();
+    words.add("flutter");
+    words.addAll(type.subCommand);
+
+    final List<String> newArgs = new ArrayList<>(args);
+    // For run, attach, and test commands, the last argument is typically a file path.
+    // We redact it to avoid logging user-specific information.
+    if (!newArgs.isEmpty() && (type == Type.RUN || type == Type.ATTACH || type == Type.TEST)) {
+      final int lastIndex = newArgs.size() - 1;
+      newArgs.set(lastIndex, "<path>");
+    }
+
+    words.addAll(newArgs);
+    return StringUtil.join(words, " ");
   }
 
   protected boolean isPubRelatedCommand() {
     return pubRelatedCommands.contains(type);
+  }
+
+  /**
+   * Starts running the command and returns the raw `Process` object.
+   *
+   * <p>This is intended for commands that need direct stream access and do not need console integration.
+   *
+   * @return the started `Process`, or null if an exception occurred.
+   */
+  @Nullable
+  public Process start() {
+    final GeneralCommandLine commandLine = createGeneralCommandLine(null);
+    final String commandText = safeCommandLog(commandLine);
+    LOG.info(commandText);
+    try {
+      return commandLine.createProcess();
+    }
+    catch (ExecutionException e) {
+      LOG.error("Failed to start Flutter command: " + commandText, e);
+      return null;
+    }
   }
 
   /**
@@ -81,7 +139,7 @@ public class FlutterCommand {
    */
   public Process start(@Nullable Consumer<ProcessOutput> onDone, @Nullable ProcessListener processListener) {
     // TODO(skybrian) add Project parameter if it turns out later that we need to set ANDROID_HOME.
-    final OSProcessHandler handler = startProcessOrShowError(null);
+    final ColoredProcessHandler handler = startProcessOrShowError(null);
     if (handler == null) {
       return null;
     }
@@ -116,8 +174,8 @@ public class FlutterCommand {
    * <p>
    * If unable to start (for example, if a command is already running), returns null.
    */
-  public OSProcessHandler startInConsole(@NotNull Project project) {
-    final OSProcessHandler handler = startProcessOrShowError(project);
+  public ColoredProcessHandler startInConsole(@NotNull Project project) {
+    final ColoredProcessHandler handler = startProcessOrShowError(project);
     if (handler != null) {
       FlutterConsoles.displayProcessLater(handler, project, null, handler::startNotify);
     }
@@ -133,7 +191,7 @@ public class FlutterCommand {
    * If unable to start (for example, if a command is already running), returns null.
    */
   public Process startInModuleConsole(@NotNull Module module, @Nullable Runnable onDone, @Nullable ProcessListener processListener) {
-    final OSProcessHandler handler = startProcessOrShowError(module.getProject());
+    final ColoredProcessHandler handler = startProcessOrShowError(module.getProject());
     if (handler == null) {
       return null;
     }
@@ -164,20 +222,17 @@ public class FlutterCommand {
    * Returns the handler if successfully started.
    */
   @Nullable
-  public OSProcessHandler startProcess(boolean sendAnalytics) {
+  public ColoredProcessHandler startProcess(boolean sendAnalytics) {
     try {
       final GeneralCommandLine commandLine = createGeneralCommandLine(null);
-      LOG.info(commandLine.toString());
-      final OSProcessHandler handler = new OSProcessHandler(commandLine);
-      if (sendAnalytics) {
-        type.sendAnalyticsEvent();
-      }
-      return handler;
+      LOG.info(safeCommandLog(commandLine));
+      return new ColoredProcessHandler(commandLine);
     }
     catch (ExecutionException e) {
       FlutterMessages.showError(
         type.title,
-        FlutterBundle.message("flutter.command.exception.message", e.getMessage()));
+        FlutterBundle.message("flutter.command.exception.message", e.getMessage()),
+        null);
       return null;
     }
   }
@@ -195,11 +250,11 @@ public class FlutterCommand {
       DartPlugin.setPubActionInProgress(true);
     }
 
-    final OSProcessHandler handler;
+    final ColoredProcessHandler handler;
     try {
       final GeneralCommandLine commandLine = createGeneralCommandLine(project);
-      LOG.info(commandLine.toString());
-      handler = new MostlySilentOsProcessHandler(commandLine);
+      LOG.info(safeCommandLog(commandLine));
+      handler = new MostlySilentColoredProcessHandler(commandLine);
       handler.addProcessListener(new ProcessAdapter() {
         @Override
         public void processTerminated(@NotNull final ProcessEvent event) {
@@ -208,7 +263,6 @@ public class FlutterCommand {
           }
         }
       });
-      type.sendAnalyticsEvent();
       return new FlutterCommandStartResult(handler);
     }
     catch (ExecutionException e) {
@@ -227,12 +281,14 @@ public class FlutterCommand {
    * Returns the handler if successfully started, or null if there was a problem.
    */
   @Nullable
-  public OSProcessHandler startProcessOrShowError(@Nullable Project project) {
+  public ColoredProcessHandler startProcessOrShowError(@Nullable Project project) {
     final FlutterCommandStartResult result = startProcess(project);
     if (result.status == FlutterCommandStartResultStatus.EXCEPTION && result.exception != null) {
       FlutterMessages.showError(
         type.title,
-        FlutterBundle.message("flutter.command.exception.message", result.exception.getMessage()));
+        FlutterBundle.message("flutter.command.exception.message", result.exception.getMessage()),
+        project
+      );
     }
     return result.processHandler;
   }
@@ -245,8 +301,8 @@ public class FlutterCommand {
   @NotNull
   public GeneralCommandLine createGeneralCommandLine(@Nullable Project project) {
     final GeneralCommandLine line = new GeneralCommandLine();
-    line.setCharset(CharsetToolkit.UTF8_CHARSET);
-    line.withEnvironment(FlutterSdkUtil.FLUTTER_HOST_ENV, FlutterSdkUtil.getFlutterHostEnvValue());
+    line.setCharset(StandardCharsets.UTF_8);
+    line.withEnvironment(FlutterSdkUtil.FLUTTER_HOST_ENV, (new FlutterSdkUtil()).getFlutterHostEnvValue());
     final String androidHome = IntelliJAndroidSdk.chooseAndroidHome(project, false);
     if (androidHome != null) {
       line.withEnvironment("ANDROID_HOME", androidHome);
@@ -260,6 +316,9 @@ public class FlutterCommand {
     }
     line.addParameters(type.subCommand);
     line.addParameters(args);
+
+    Analytics.updateEnvironment(line);
+
     return line;
   }
 
@@ -274,7 +333,7 @@ public class FlutterCommand {
     CONFIG("Flutter config", "config"),
     CREATE("Flutter create", "create"),
     DOCTOR("Flutter doctor", "doctor", "--verbose"),
-    MAKE_HOST_APP_EDITABLE("Flutter make-host-app-editable", "make-host-app-editable"),
+    PUB_ADD("Flutter pub add", "pub", "add"),
     PUB_GET("Flutter pub get", "pub", "get"),
     PUB_UPGRADE("Flutter pub upgrade", "pub", "upgrade"),
     PUB_OUTDATED("Flutter pub outdated", "pub", "outdated"),
@@ -282,19 +341,26 @@ public class FlutterCommand {
     RUN("Flutter run", "run"),
     UPGRADE("Flutter upgrade", "upgrade"),
     VERSION("Flutter version", "--version"),
+    WIDGET_PREVIEW("Flutter widget preview", "widget-preview"),
     TEST("Flutter test", "test");
 
     final public String title;
-    final ImmutableList<String> subCommand;
+    final @NotNull ImmutableList<String> subCommand;
 
-    Type(String title, String... subCommand) {
+    Type(String title, @NotNull String... subCommand) {
       this.title = title;
+      assert subCommand != null;
       this.subCommand = ImmutableList.copyOf(subCommand);
     }
+  }
 
-    void sendAnalyticsEvent() {
-      final String action = String.join("_", subCommand).replaceAll("-", "");
-      FlutterInitializer.getAnalytics().sendEvent("flutter", action);
+  private @NotNull String safeCommandLog(@NotNull GeneralCommandLine commandLine) {
+    if (FlutterSettings.getInstance().isFilePathLoggingEnabled()) {
+      final String fullString = commandLine.toString();
+      return fullString != null ? fullString : "";
     }
+
+    final Path path = Path.of(commandLine.getExePath());
+    return path.getFileName() + " " + commandLine.getParametersList();
   }
 }

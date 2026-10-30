@@ -15,9 +15,12 @@ import com.intellij.execution.runners.ExecutionEnvironment;
 import com.intellij.execution.testframework.sm.SMTestRunnerConnectionUtil;
 import com.intellij.execution.testframework.ui.BaseTestsOutputConsoleView;
 import com.intellij.execution.ui.ConsoleView;
+import com.intellij.openapi.fileEditor.FileDocumentManager;
 import com.intellij.openapi.module.Module;
 import com.intellij.openapi.module.ModuleUtil;
 import com.intellij.openapi.project.Project;
+import com.intellij.openapi.project.ProjectUtil;
+import com.intellij.openapi.util.Key;
 import com.intellij.openapi.vfs.VirtualFile;
 import com.jetbrains.lang.dart.ide.runner.DartConsoleFilter;
 import com.jetbrains.lang.dart.ide.runner.DartRelativePathsConsoleFilter;
@@ -35,7 +38,7 @@ import org.jetbrains.annotations.Nullable;
 /**
  * A launcher that starts a process to run flutter tests, created from a run configuration.
  */
-class TestLaunchState extends CommandLineState {
+public class TestLaunchState extends CommandLineState {
   @NotNull
   private final TestConfig config;
 
@@ -49,6 +52,8 @@ class TestLaunchState extends CommandLineState {
   private final PubRoot pubRoot;
 
   private final boolean testConsoleEnabled;
+
+  private ProcessHandler processHandler;
 
   private TestLaunchState(@NotNull ExecutionEnvironment env, @NotNull TestConfig config, @NotNull VirtualFile testFileOrDir,
                           @NotNull PubRoot pubRoot, boolean testConsoleEnabled) {
@@ -68,6 +73,7 @@ class TestLaunchState extends CommandLineState {
     catch (RuntimeConfigurationError e) {
       throw new ExecutionException(e);
     }
+    FileDocumentManager.getInstance().saveAllDocuments();
 
     final VirtualFile fileOrDir = fields.getFileOrDir();
     assert (fileOrDir != null);
@@ -77,9 +83,8 @@ class TestLaunchState extends CommandLineState {
 
     final FlutterSdk sdk = FlutterSdk.getFlutterSdk(env.getProject());
     assert (sdk != null);
-    final boolean testConsoleEnabled = sdk.getVersion().flutterTestSupportsMachineMode();
 
-    final TestLaunchState launcher = new TestLaunchState(env, config, fileOrDir, pubRoot, testConsoleEnabled);
+    final TestLaunchState launcher = new TestLaunchState(env, config, fileOrDir, pubRoot, true);
     DaemonConsoleView.install(launcher, env, pubRoot.getRoot());
     return launcher;
   }
@@ -92,6 +97,7 @@ class TestLaunchState extends CommandLineState {
     switch (result.status) {
       case OK:
         assert result.processHandler != null;
+        processHandler = result.processHandler;
         return result.processHandler;
       case EXCEPTION:
         assert result.exception != null;
@@ -131,7 +137,7 @@ class TestLaunchState extends CommandLineState {
     if (root != null) {
       return root.getPath();
     }
-    final VirtualFile baseDir = config.getProject().getBaseDir();
+    final VirtualFile baseDir = ProjectUtil.guessProjectDir(config.getProject());
     return baseDir == null ? null : baseDir.getPath();
   }
 
@@ -143,5 +149,15 @@ class TestLaunchState extends CommandLineState {
   @NotNull
   PubRoot getPubRoot() {
     return pubRoot;
+  }
+
+  public boolean isTerminated() {
+    return processHandler != null && processHandler.isProcessTerminated();
+  }
+
+  public void notifyTextAvailable(@NotNull String text, @NotNull Key<?> outputType) {
+    if (processHandler != null) {
+      processHandler.notifyTextAvailable(text, outputType);
+    }
   }
 }

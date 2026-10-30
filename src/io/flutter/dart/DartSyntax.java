@@ -17,9 +17,25 @@ import java.util.Objects;
 import java.util.regex.Pattern;
 
 /**
- * Finds Dart PSI elements in IntelliJ's syntax tree.
+ * Constants and utility methods for working with Dart language syntax.
+ * <p>
+ * This class provides a collection of common Dart syntax elements, patterns,
+ * and keywords used throughout the plugin. It serves as a central repository
+ * for syntax-related constants and helper methods to ensure consistency in
+ * Dart code analysis and manipulation.
+ * <p>
+ * The class includes regular expressions, common syntax patterns, and utility
+ * methods for identifying and working with various Dart language constructs.
+ * This helps maintain consistency across the plugin when dealing with Dart
+ * syntax elements.
+ * <p>
+ * All members in this class are static as this is a utility class.
  */
 public class DartSyntax {
+
+  private DartSyntax() {
+    throw new AssertionError("No instances.");
+  }
 
   /**
    * Finds the enclosing function call where the function being called has the given name.
@@ -28,7 +44,7 @@ public class DartSyntax {
    */
   @Nullable
   public static DartCallExpression findEnclosingFunctionCall(@NotNull PsiElement elt, @NotNull String functionName) {
-    return findEnclosingFunctionCall(elt, functionName, new Equator<String, String>() {
+    return findEnclosingFunctionCall(elt, functionName, new Equator<>() {
       @Override
       boolean equate(@NotNull String first, @NotNull String second) {
         return Objects.equals(first, second);
@@ -43,7 +59,7 @@ public class DartSyntax {
    */
   @Nullable
   public static DartCallExpression findEnclosingFunctionCall(@NotNull PsiElement elt, @NotNull Pattern functionRegex) {
-    return findEnclosingFunctionCall(elt, functionRegex, new Equator<Pattern, String>() {
+    return findEnclosingFunctionCall(elt, functionRegex, new Equator<>() {
       @Override
       boolean equate(@NotNull Pattern first, @NotNull String second) {
         return first.matcher(second).matches();
@@ -51,11 +67,10 @@ public class DartSyntax {
     });
   }
 
-  private static <T> DartCallExpression findEnclosingFunctionCall(
+  private static <T> @Nullable DartCallExpression findEnclosingFunctionCall(
     @NotNull PsiElement elt, @NotNull T functionDescriptor, @NotNull Equator<T, String> equator) {
     while (elt != null) {
-      if (elt instanceof DartCallExpression) {
-        final DartCallExpression call = (DartCallExpression)elt;
+      if (elt instanceof DartCallExpression call) {
         final String name = getCalledFunctionName(call);
         if (name != null && equator.equate(functionDescriptor, name)) {
           return call;
@@ -68,14 +83,11 @@ public class DartSyntax {
 
   /**
    * Finds the closest named function call that encloses {@param element}.
-   *
-   * @param element
    */
   @Nullable
   public static DartCallExpression findClosestEnclosingFunctionCall(@Nullable PsiElement element) {
     while (element != null) {
-      if (element instanceof DartCallExpression) {
-        final DartCallExpression call = (DartCallExpression)element;
+      if (element instanceof DartCallExpression call) {
         final String name = getCalledFunctionName(call);
         if (name != null) {
           return call;
@@ -113,7 +125,7 @@ public class DartSyntax {
   /**
    * Gets an argument to a function call, provided that the expression has the given type.
    * <p>
-   * Returns null if the argument doesn't exist or it's not the given type.
+   * Returns null if the argument doesn't exist, or it's not the given type.
    */
   @Nullable
   public static <E extends DartExpression> E getArgument(@NotNull DartCallExpression call, int index, @NotNull Class<E> expectedClass) {
@@ -182,16 +194,15 @@ public class DartSyntax {
     // We expect a quote, string part, quote.
     if (lit.getFirstChild() == null) return null;
     final PsiElement second = lit.getFirstChild().getNextSibling();
-    if (second.getNextSibling() != lit.getLastChild()) return null; // not three items
-    if (!(second instanceof LeafPsiElement)) return null;
-    final LeafPsiElement leaf = (LeafPsiElement)second;
+    if (second != null && (second.getNextSibling() != lit.getLastChild())) return null; // not three items
+    if (!(second instanceof LeafPsiElement leaf)) return null;
 
     if (leaf.getElementType() != DartTokenTypes.REGULAR_STRING_PART) return null;
     return leaf.getText();
   }
 
   @Nullable
-  private static String getCalledFunctionName(@NotNull DartCallExpression call) {
+  public static String getCalledFunctionName(@NotNull DartCallExpression call) {
     if (!(call.getFirstChild() instanceof DartReference)) return null;
     return call.getFirstChild().getText();
   }

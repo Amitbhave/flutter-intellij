@@ -5,11 +5,8 @@
  */
 package io.flutter.editor;
 
-import com.intellij.AppTopics;
-import com.intellij.openapi.application.ApplicationManager;
+import com.intellij.application.options.CodeStyle;
 import com.intellij.openapi.command.WriteCommandAction;
-import com.intellij.openapi.components.ServiceManager;
-import com.intellij.openapi.diagnostic.Logger;
 import com.intellij.openapi.editor.Document;
 import com.intellij.openapi.fileEditor.FileDocumentManager;
 import com.intellij.openapi.fileEditor.FileDocumentManagerListener;
@@ -20,7 +17,6 @@ import com.intellij.openapi.util.text.StringUtil;
 import com.intellij.openapi.vfs.VirtualFile;
 import com.intellij.psi.PsiDocumentManager;
 import com.intellij.psi.PsiFile;
-import com.intellij.psi.codeStyle.CodeStyleSettingsManager;
 import com.intellij.util.PsiErrorElementUtil;
 import com.intellij.util.messages.MessageBus;
 import com.intellij.util.messages.MessageBusConnection;
@@ -30,9 +26,11 @@ import com.jetbrains.lang.dart.assists.AssistUtils;
 import io.flutter.FlutterUtils;
 import io.flutter.dart.DartPlugin;
 import io.flutter.settings.FlutterSettings;
+import io.flutter.utils.OpenApiUtils;
 import org.dartlang.analysis.server.protocol.SourceEdit;
 import org.dartlang.analysis.server.protocol.SourceFileEdit;
 import org.jetbrains.annotations.NotNull;
+import org.jetbrains.annotations.Nullable;
 
 import java.util.Collections;
 import java.util.List;
@@ -41,7 +39,6 @@ import java.util.List;
  * A manager class to run actions on save (formatting, organize imports, ...).
  */
 public class FlutterSaveActionsManager {
-  private static final Logger LOG = Logger.getInstance(FlutterSaveActionsManager.class);
 
   /**
    * Initialize the save actions manager for the given project.
@@ -51,8 +48,9 @@ public class FlutterSaveActionsManager {
     getInstance(project);
   }
 
+  @Nullable
   public static FlutterSaveActionsManager getInstance(@NotNull Project project) {
-    return ServiceManager.getService(project, FlutterSaveActionsManager.class);
+    return project.getService(FlutterSaveActionsManager.class);
   }
 
   private final @NotNull Project myProject;
@@ -62,7 +60,7 @@ public class FlutterSaveActionsManager {
 
     final MessageBus bus = project.getMessageBus();
     final MessageBusConnection connection = bus.connect();
-    connection.subscribe(AppTopics.FILE_DOCUMENT_SYNC, new FileDocumentManagerListener() {
+    connection.subscribe(FileDocumentManagerListener.TOPIC, new FileDocumentManagerListener() {
       @Override
       public void beforeDocumentSaving(@NotNull Document document) {
         // Don't try and format read only docs.
@@ -115,26 +113,25 @@ public class FlutterSaveActionsManager {
 
     if (DartAnalysisServerService.getInstance(myProject).serverReadyForRequest()) {
       if (settings.isOrganizeImportsOnSave()) {
-        performOrganizeThenFormat(document, file);
+        performOrganizeThenFormat(document, file, psiFile);
       }
       else {
-        performFormat(document, file, false);
+        performFormat(document, file, false, psiFile);
       }
     }
   }
 
-  private void performOrganizeThenFormat(@NotNull Document document, @NotNull VirtualFile file) {
+  private void performOrganizeThenFormat(@NotNull Document document, @NotNull VirtualFile file, @NotNull PsiFile psiFile) {
     final String filePath = file.getPath();
     final SourceFileEdit fileEdit = DartAnalysisServerService.getInstance(myProject).edit_organizeDirectives(filePath);
 
-    if (myProject.isDisposed()) {
-      return;
-    }
-
     if (fileEdit != null) {
-      ApplicationManager.getApplication().invokeLater(() -> new WriteCommandAction.Simple(myProject) {
-        @Override
-        protected void run() {
+      OpenApiUtils.safeInvokeLater(() -> {
+        if (myProject.isDisposed()) {
+          return;
+        }
+
+        WriteCommandAction.writeCommandAction(myProject).run(() -> {
           if (myProject.isDisposed()) {
             return;
           }
@@ -146,16 +143,16 @@ public class FlutterSaveActionsManager {
 
           // Run this in an invoke later so that we don't exeucte the initial part of performFormat in a write action.
           //noinspection CodeBlock2Expr
-          ApplicationManager.getApplication().invokeLater(() -> {
-            performFormat(document, file, true);
+          OpenApiUtils.safeInvokeLater(() -> {
+            performFormat(document, file, true, psiFile);
           });
-        }
-      }.execute());
+        });
+      });
     }
   }
 
-  private void performFormat(@NotNull Document document, @NotNull VirtualFile file, boolean reSave) {
-    final int lineLength = getRightMargin(myProject);
+  private void performFormat(@NotNull Document document, @NotNull VirtualFile file, boolean reSave, @NotNull PsiFile psiFile) {
+    final int lineLength = getRightMargin(psiFile);
     final DartAnalysisServerService das = DartAnalysisServerService.getInstance(myProject);
 
     das.updateFilesContent();
@@ -169,13 +166,12 @@ public class FlutterSaveActionsManager {
       return;
     }
 
-    if (myProject.isDisposed()) {
-      return;
-    }
+    OpenApiUtils.safeInvokeLater(() -> {
+      if (myProject.isDisposed()) {
+        return;
+      }
 
-    ApplicationManager.getApplication().invokeLater(() -> new WriteCommandAction.Simple(myProject) {
-      @Override
-      protected void run() {
+      WriteCommandAction.writeCommandAction(myProject).run(() -> {
         if (myProject.isDisposed()) {
           return;
         }
@@ -194,15 +190,15 @@ public class FlutterSaveActionsManager {
         // Don't perform the save in a write action - it could invoke EDT work.
         if (reSave || didFormat) {
           //noinspection CodeBlock2Expr
-          ApplicationManager.getApplication().invokeLater(() -> {
+          OpenApiUtils.safeInvokeLater(() -> {
             FileDocumentManager.getInstance().saveDocument(document);
           });
         }
-      }
-    }.execute());
+      });
+    });
   }
 
-  private static int getRightMargin(@NotNull Project project) {
-    return CodeStyleSettingsManager.getSettings(project).getCommonSettings(DartLanguage.INSTANCE).RIGHT_MARGIN;
+  private static int getRightMargin(@NotNull PsiFile psiFile) {
+    return CodeStyle.getLanguageSettings(psiFile, DartLanguage.INSTANCE).RIGHT_MARGIN;
   }
 }

@@ -5,32 +5,60 @@
  */
 package io.flutter.run.test;
 
-import com.google.gson.*;
+import com.google.gson.JsonElement;
+import com.google.gson.JsonObject;
+import com.google.gson.JsonPrimitive;
+import com.google.gson.JsonSyntaxException;
 import com.intellij.execution.ExecutionException;
 import com.intellij.execution.ExecutionResult;
 import com.intellij.execution.configurations.RunProfile;
 import com.intellij.execution.configurations.RunProfileState;
 import com.intellij.execution.executors.DefaultDebugExecutor;
-import com.intellij.execution.process.*;
+import com.intellij.execution.process.ProcessEvent;
+import com.intellij.execution.process.ProcessHandler;
+import com.intellij.execution.process.ProcessListener;
+import com.intellij.execution.process.ProcessOutputTypes;
 import com.intellij.execution.runners.ExecutionEnvironment;
 import com.intellij.execution.runners.GenericProgramRunner;
+import com.intellij.execution.runners.RunContentBuilder;
 import com.intellij.execution.ui.RunContentDescriptor;
+import com.intellij.openapi.application.ApplicationManager;
 import com.intellij.openapi.diagnostic.Logger;
 import com.intellij.openapi.util.Key;
+import com.intellij.openapi.wm.ToolWindowId;
+import com.intellij.util.TimeoutUtil;
 import com.intellij.xdebugger.XDebugProcess;
 import com.intellij.xdebugger.XDebugProcessStarter;
 import com.intellij.xdebugger.XDebugSession;
 import com.intellij.xdebugger.XDebuggerManager;
 import com.jetbrains.lang.dart.util.DartUrlResolver;
 import io.flutter.FlutterUtils;
+import io.flutter.run.FlutterDebugSessionUtils;
 import io.flutter.ObservatoryConnector;
+import io.flutter.logging.PluginLogger;
 import io.flutter.run.FlutterPositionMapper;
 import io.flutter.run.common.CommonTestConfigUtils;
 import io.flutter.sdk.FlutterSdk;
 import io.flutter.settings.FlutterSettings;
+import io.flutter.utils.JsonUtils;
+import io.flutter.utils.ProcessAdapter;
 import io.flutter.utils.StdoutJsonParser;
+import io.flutter.utils.VmServiceListenerAdapter;
+import io.flutter.vmService.VmServiceConsumers;
+import io.flutter.vmService.VmServiceConsumers.EmptyResumeConsumer;
+import org.dartlang.vm.service.VmService;
+import org.dartlang.vm.service.consumer.VMConsumer;
+import org.dartlang.vm.service.element.ElementList;
+import org.dartlang.vm.service.element.Event;
+import org.dartlang.vm.service.element.EventKind;
+import org.dartlang.vm.service.element.Isolate;
+import org.dartlang.vm.service.element.IsolateRef;
+import org.dartlang.vm.service.element.RPCError;
+import org.dartlang.vm.service.element.VM;
 import org.jetbrains.annotations.NotNull;
 import org.jetbrains.annotations.Nullable;
+
+import java.io.IOException;
 
 /**
  * Runs a Flutter test configuration in the debugger.
@@ -44,16 +72,16 @@ public class FlutterTestRunner extends GenericProgramRunner {
 
   @Override
   public boolean canRun(@NotNull String executorId, @NotNull RunProfile profile) {
-    if (!DefaultDebugExecutor.EXECUTOR_ID.equals(executorId) || !(profile instanceof TestConfig)) {
+    if (!(DefaultDebugExecutor.EXECUTOR_ID.equals(executorId) || ToolWindowId.RUN.equals(executorId)) ||
+        !(profile instanceof TestConfig config)) {
       return false;
     }
 
-    final FlutterSdk sdk = FlutterSdk.getFlutterSdk(((TestConfig)profile).getProject());
-    if (sdk == null || !sdk.getVersion().flutterTestSupportsMachineMode()) {
+    final FlutterSdk sdk = FlutterSdk.getFlutterSdk(config.getProject());
+    if (sdk == null) {
       return false;
     }
 
-    final TestConfig config = (TestConfig)profile;
     return config.getFields().getScope() != TestFields.Scope.DIRECTORY;
   }
 
@@ -61,7 +89,112 @@ public class FlutterTestRunner extends GenericProgramRunner {
   @Override
   protected RunContentDescriptor doExecute(@NotNull RunProfileState state, @NotNull ExecutionEnvironment env)
     throws ExecutionException {
-    return runInDebugger((TestLaunchState)state, env);
+    if (env.getExecutor().getId().equals(ToolWindowId.RUN)) {
+      return run((TestLaunchState)state, env);
+    }
+    else {
+      return runInDebugger((TestLaunchState)state, env);
+    }
+  }
+
+  protected RunContentDescriptor run(@NotNull TestLaunchState launcher, @NotNull ExecutionEnvironment env)
+    throws ExecutionException {
+    final ExecutionResult executionResult = launcher.execute(env.getExecutor(), this);
+    final ObservatoryConnector connector = new Connector(executionResult.getProcessHandler());
+
+    ApplicationManager.getApplication().executeOnPooledThread(() -> {
+      // Poll, waiting for "flutter run" to give us a websocket.
+      // This is adapted from DartVmServiceDebugProcess::scheduleConnect.
+      String url = connector.getWebSocketUrl();
+
+      while (url == null) {
+        if (launcher.isTerminated()) {
+          return;
+        }
+
+        TimeoutUtil.sleep(100);
+
+        url = connector.getWebSocketUrl();
+      }
+
+      if (launcher.isTerminated()) {
+        return;
+      }
+
+      final VmService vmService;
+
+      try {
+        vmService = VmService.connect(url);
+      }
+      catch (IOException | RuntimeException e) {
+        if (!launcher.isTerminated()) {
+          launcher.notifyTextAvailable(
+            "Failed to connect to the VM service at: " + url + "\n" + e + "\n",
+            ProcessOutputTypes.STDERR);
+        }
+        return;
+      }
+
+      // Listen for debug 'PauseStart' events for isolates after the initial connect and resume those isolates.
+      vmService.streamListen(VmService.DEBUG_STREAM_ID, VmServiceConsumers.EMPTY_SUCCESS_CONSUMER);
+      vmService.addVmServiceListener(new VmServiceListenerAdapter() {
+        @Override
+        public void received(String streamId, Event event) {
+          if (EventKind.PauseStart.equals(event.getKind())) {
+            resumePausedAtStartIsolate(launcher, vmService, event.getIsolate());
+          }
+        }
+      });
+
+      // Resume any isolates paused at the initial connect.
+      vmService.getVM(new VMConsumer() {
+        @Override
+        public void received(VM response) {
+          final ElementList<IsolateRef> isolates = response.getIsolates();
+          for (IsolateRef isolateRef : isolates) {
+            resumePausedAtStartIsolate(launcher, vmService, isolateRef);
+          }
+        }
+
+        @Override
+        public void onError(RPCError error) {
+          if (!launcher.isTerminated()) {
+            launcher.notifyTextAvailable(
+              "Error connecting to VM: " + error.getCode() + " " + error.getMessage() + "\n",
+              ProcessOutputTypes.STDERR);
+          }
+        }
+      });
+    });
+
+    return new RunContentBuilder(executionResult, env).showRunContent(env.getContentToReuse());
+  }
+
+  private void resumePausedAtStartIsolate(@NotNull TestLaunchState launcher, @NotNull VmService vmService, @NotNull IsolateRef isolateRef) {
+    if (isolateRef.getIsSystemIsolate()) {
+      return;
+    }
+
+    vmService.getIsolate(isolateRef.getId(), new VmServiceConsumers.GetIsolateConsumerWrapper() {
+      @Override
+      public void received(Isolate isolate) {
+        final Event event = isolate.getPauseEvent();
+        final EventKind eventKind = event.getKind();
+
+        if (eventKind == EventKind.PauseStart) {
+          vmService.resume(isolateRef.getId(), new EmptyResumeConsumer() {
+            @Override
+            public void onError(RPCError error) {
+              if (!launcher.isTerminated()) {
+                launcher.notifyTextAvailable(
+                  "Error resuming isolate " + isolateRef.getId() + ": " + error.getCode() + " " + error.getMessage() + "\n",
+                  ProcessOutputTypes.STDERR);
+              }
+            }
+          });
+        }
+      }
+    });
   }
 
   protected RunContentDescriptor runInDebugger(@NotNull TestLaunchState launcher, @NotNull ExecutionEnvironment env)
@@ -73,20 +206,17 @@ public class FlutterTestRunner extends GenericProgramRunner {
 
     // Set up source file mapping.
     final DartUrlResolver resolver = DartUrlResolver.getInstance(env.getProject(), launcher.getTestFileOrDir());
-    final FlutterPositionMapper.Analyzer analyzer = FlutterPositionMapper.Analyzer.create(env.getProject(), launcher.getTestFileOrDir());
-    final FlutterPositionMapper mapper = new FlutterPositionMapper(env.getProject(), launcher.getPubRoot().getRoot(), resolver, analyzer);
+    final FlutterPositionMapper mapper = new FlutterPositionMapper(env.getProject(), launcher.getPubRoot().getRoot(), resolver);
 
     // Create the debug session.
     final XDebuggerManager manager = XDebuggerManager.getInstance(env.getProject());
-    final XDebugSession session = manager.startSession(env, new XDebugProcessStarter() {
+    return FlutterDebugSessionUtils.startSessionAndGetDescriptor(manager, env, new XDebugProcessStarter() {
       @Override
       @NotNull
       public XDebugProcess start(@NotNull final XDebugSession session) {
         return new TestDebugProcess(env, session, executionResult, resolver, connector, mapper);
       }
-    });
-
-    return session.getRunContentDescriptor();
+    }, false);
   }
 
   /**
@@ -162,12 +292,11 @@ public class FlutterTestRunner extends GenericProgramRunner {
     private void dispatchJson(String json) {
       final JsonObject obj;
       try {
-        final JsonParser jp = new JsonParser();
-        final JsonElement elem = jp.parse(json);
+        final JsonElement elem = JsonUtils.parseString(json);
         obj = elem.getAsJsonObject();
       }
       catch (JsonSyntaxException e) {
-        FlutterUtils.warn(LOG, "Unable to parse JSON from Flutter test", e);
+        FlutterUtils.warn(LOG, "Unable to parse JSON from Flutter test", e, true);
         return;
       }
 
@@ -197,13 +326,25 @@ public class FlutterTestRunner extends GenericProgramRunner {
       }
 
       if (eventName.equals("test.startedProcess")) {
-        final JsonPrimitive primUri = params.getAsJsonPrimitive("observatoryUri");
-        if (primUri != null) {
-          observatoryUri = primUri.getAsString();
+        // Since Flutter release 3.34, "observatoryUri" is no longer available due to the removal of
+        // Observatory in favor of DevTools/VM Service.
+        // Since then, only the field "vmServiceUri" is given in this event (contrary to both fields
+        // on earlier versions).
+        final JsonPrimitive primVmServiceUri = params.getAsJsonPrimitive("vmServiceUri");
+
+        if (primVmServiceUri != null) {
+          observatoryUri = primVmServiceUri.getAsString();
+        }
+        else {
+          final JsonPrimitive primObservatoryUri = params.getAsJsonPrimitive("observatoryUri");
+
+          if (primObservatoryUri != null) {
+            observatoryUri = primObservatoryUri.getAsString();
+          }
         }
       }
     }
   }
 
-  private static final Logger LOG = Logger.getInstance(FlutterTestRunner.class);
+  private static final @NotNull Logger LOG = PluginLogger.createLogger(FlutterTestRunner.class);
 }

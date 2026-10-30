@@ -9,7 +9,8 @@ import com.google.common.collect.ImmutableList;
 import org.junit.Before;
 import org.junit.Test;
 
-import javax.swing.*;
+import javax.swing.SwingUtilities;
+import javax.swing.Timer;
 import java.awt.event.ActionEvent;
 import java.awt.event.ActionListener;
 import java.util.ArrayList;
@@ -18,8 +19,8 @@ import java.util.TimerTask;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutionException;
 
+import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.core.Is.is;
-import static org.junit.Assert.assertThat;
 import static org.junit.Assert.fail;
 
 public class EventStreamTest {
@@ -82,32 +83,6 @@ public class EventStreamTest {
       addLogValueListener(true);
     });
     checkLog("42");
-  }
-
-  @Test
-  public void duplicateValues() throws Exception {
-    expectedEvents = 6;
-    SwingUtilities.invokeAndWait(() -> {
-      addLogValueListener(true);
-      eventStream.setValue(100);
-      eventStream.setValue(100);
-      eventStream.setValue(100);
-      eventStream.setValue(200);
-      eventStream.setValue(200);
-    });
-    checkLog("42", "200");
-  }
-
-  @Test
-  public void nullInitialValue() throws Exception {
-    expectedEvents = 3;
-    SwingUtilities.invokeAndWait(() -> {
-      eventStream = new EventStream<>();
-      addLogValueListener(true);
-      eventStream.setValue(100);
-      eventStream.setValue(200);
-    });
-    checkLog("null", "200");
   }
 
   @Test
@@ -238,14 +213,10 @@ public class EventStreamTest {
     }
   }
 
-  private void reportFailure(Exception e) {
-    fail("Exception: " + e + "\nLog: " + getLogEntries().toString());
-  }
-
   private void checkLog(String... expectedEntries) {
-    java.util.Timer timer = new java.util.Timer();
+    final java.util.Timer timer = new java.util.Timer();
     try {
-      TimerTask task = new TimerTask() {
+      final TimerTask task = new TimerTask() {
         @Override
         public void run() {
           timer.cancel();

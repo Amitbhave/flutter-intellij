@@ -5,19 +5,22 @@
  */
 package io.flutter.actions;
 
-import com.intellij.openapi.actionSystem.AnActionEvent;
-import com.intellij.openapi.actionSystem.CommonDataKeys;
-import com.intellij.openapi.actionSystem.DefaultActionGroup;
-import com.intellij.openapi.actionSystem.Presentation;
+import com.intellij.openapi.actionSystem.*;
 import com.intellij.openapi.project.Project;
+import com.intellij.openapi.project.ProjectUtil;
 import com.intellij.openapi.vfs.VirtualFile;
 import io.flutter.FlutterUtils;
 import org.jetbrains.annotations.NotNull;
 import org.jetbrains.annotations.Nullable;
 
+/**
+ * This action has been removed from the plugin.xml as a required dependent method call {GradleProjectImporter.importAndOpenProjectCore()
+ * throws "configureNewProject should be used with new projects only".
+ * See https://github.com/flutter/flutter-intellij/issues/7103
+ */
 public class FlutterExternalIdeActionGroup extends DefaultActionGroup {
-  private static boolean isExternalIdeFile(AnActionEvent e) {
-    VirtualFile file = e.getData(CommonDataKeys.VIRTUAL_FILE);
+  private static boolean isExternalIdeFile(@NotNull AnActionEvent e) {
+    @SuppressWarnings("DataFlowIssue") final VirtualFile file = e.getData(CommonDataKeys.VIRTUAL_FILE);
     if (file == null || !file.exists()) {
       return false;
     }
@@ -31,6 +34,11 @@ public class FlutterExternalIdeActionGroup extends DefaultActionGroup {
       FlutterUtils.isXcodeProjectFileName(file.getName()) || OpenInAndroidStudioAction.isProjectFileName(file.getName());
   }
 
+  @Override
+  public @NotNull ActionUpdateThread getActionUpdateThread() {
+    return ActionUpdateThread.EDT;
+  }
+
   public static boolean isAndroidDirectory(@NotNull VirtualFile file) {
     return file.isDirectory() && (file.getName().equals("android") || file.getName().equals(".android"));
   }
@@ -40,7 +48,7 @@ public class FlutterExternalIdeActionGroup extends DefaultActionGroup {
   }
 
   protected static boolean isWithinAndroidDirectory(@NotNull VirtualFile file, @NotNull Project project) {
-    final VirtualFile baseDir = project.getBaseDir();
+    final VirtualFile baseDir = ProjectUtil.guessProjectDir(project);
     if (baseDir == null) {
       return false;
     }
@@ -55,7 +63,7 @@ public class FlutterExternalIdeActionGroup extends DefaultActionGroup {
   }
 
   protected static boolean isWithinIOsDirectory(@NotNull VirtualFile file, @NotNull Project project) {
-    final VirtualFile baseDir = project.getBaseDir();
+    final VirtualFile baseDir = ProjectUtil.guessProjectDir(project);
     if (baseDir == null) {
       return false;
     }
@@ -74,12 +82,12 @@ public class FlutterExternalIdeActionGroup extends DefaultActionGroup {
       return false;
     }
 
-    final VirtualFile baseDir = project.getBaseDir();
+    final VirtualFile baseDir = ProjectUtil.guessProjectDir(project);
     return baseDir != null && baseDir.getPath().equals(file.getPath());
   }
 
   @Override
-  public void update(AnActionEvent event) {
+  public void update(@NotNull AnActionEvent event) {
     final Presentation presentation = event.getPresentation();
     final boolean enabled = isExternalIdeFile(event);
     presentation.setEnabled(enabled);

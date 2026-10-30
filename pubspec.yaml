@@ -1,8 +1,24 @@
 name: flutter_intellij
 version: 0.1.0
+publish_to: none
+
+environment:
+  sdk: ^3.5.0
+
+workspace:
+  - tool/plugin
+
 dependencies:
   args: any
   path: any
+
 dev_dependencies:
-  grinder: ^0.8.0
-  http: ^0.12.0
+  grinder: ^0.10.1
+  http: ^1.2.0
+  lints: ^6.0.0
+  meta: any
+  # Requires >=0.5.2: that version resolves the directory paths in
+  # tool/skills_lint.yaml relative to the config file rather than the
+  # CWD, which is why that config uses "../.agents/skills". Downgrading
+  # below 0.5.2 would resolve that path outside the repository.
+  skills_lint: ^0.5.2

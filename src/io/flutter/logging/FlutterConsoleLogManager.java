@@ -7,24 +7,35 @@
 package io.flutter.logging;
 
 import com.google.common.annotations.VisibleForTesting;
-import com.google.gson.*;
+import com.google.gson.GsonBuilder;
+import com.google.gson.JsonElement;
+import com.google.gson.JsonObject;
+import com.google.gson.JsonSyntaxException;
 import com.intellij.execution.ui.ConsoleView;
 import com.intellij.execution.ui.ConsoleViewContentType;
+import com.intellij.icons.AllIcons;
 import com.intellij.ide.util.PropertiesComponent;
+import com.intellij.notification.*;
+import com.intellij.openapi.actionSystem.AnAction;
+import com.intellij.openapi.actionSystem.AnActionEvent;
 import com.intellij.openapi.diagnostic.Logger;
 import com.intellij.openapi.editor.ex.EditorSettingsExternalizable;
 import com.intellij.openapi.editor.impl.softwrap.SoftWrapAppliancePlaces;
-import com.intellij.openapi.util.Disposer;
+import com.intellij.openapi.project.Project;
 import com.intellij.openapi.util.text.StringUtil;
+import com.intellij.openapi.wm.ToolWindow;
+import com.intellij.openapi.wm.ToolWindowManager;
+import com.intellij.openapi.wm.ex.ToolWindowManagerEx;
 import com.intellij.ui.SimpleTextAttributes;
 import com.intellij.util.concurrency.QueueProcessor;
-import io.flutter.FlutterInitializer;
-import io.flutter.inspector.DiagnosticLevel;
-import io.flutter.inspector.DiagnosticsNode;
-import io.flutter.inspector.DiagnosticsTreeStyle;
-import io.flutter.inspector.InspectorService;
+import io.flutter.FlutterUtils;
+import io.flutter.devtools.DevToolsUtils;
+import io.flutter.jxbrowser.JxBrowserManager;
 import io.flutter.run.daemon.FlutterApp;
 import io.flutter.settings.FlutterSettings;
+import io.flutter.utils.JsonUtils;
+import io.flutter.view.EmbeddedBrowser;
+import io.flutter.view.InspectorView;
 import io.flutter.vmService.VmServiceConsumers;
 import org.dartlang.vm.service.VmService;
 import org.dartlang.vm.service.consumer.GetObjectConsumer;
@@ -36,16 +47,19 @@ import java.util.ArrayList;
 import java.util.Collections;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 
 /**
  * Handle displaying dart:developer log messages and Flutter.Error messages in the Run and Debug
  * console.
  */
 public class FlutterConsoleLogManager {
-  private static final Logger LOG = Logger.getInstance(FlutterConsoleLogManager.class);
+  private static final @NotNull Logger LOG = PluginLogger.createLogger(FlutterConsoleLogManager.class);
 
   private static final String consolePreferencesSetKey = "io.flutter.console.preferencesSet";
+  private static final String DEEP_LINK_GROUP_ID = "deeplink";
 
   private static final ConsoleViewContentType TITLE_CONTENT_TYPE =
     new ConsoleViewContentType("title", SimpleTextAttributes.REGULAR_BOLD_ATTRIBUTES.toTextAttributes());
@@ -54,8 +68,8 @@ public class FlutterConsoleLogManager {
     new ConsoleViewContentType("subtle", SimpleTextAttributes.GRAY_ATTRIBUTES.toTextAttributes());
   private static final ConsoleViewContentType ERROR_CONTENT_TYPE = ConsoleViewContentType.ERROR_OUTPUT;
 
-  final private CompletableFuture<InspectorService.ObjectGroup> objectGroup;
   private static QueueProcessor<Runnable> queue;
+  private static final AtomicInteger queueLength = new AtomicInteger();
 
   /**
    * Set our preferred settings for the run console.
@@ -71,7 +85,6 @@ public class FlutterConsoleLogManager {
     }
   }
 
-  @NotNull final VmService service;
   @NotNull final ConsoleView console;
   @NotNull final FlutterApp app;
 
@@ -80,9 +93,6 @@ public class FlutterConsoleLogManager {
   public FlutterConsoleLogManager(@NotNull ConsoleView console, @NotNull FlutterApp app) {
     this.console = console;
     this.app = app;
-
-    assert (app.getVmService() != null);
-    this.service = app.getVmService();
 
     app.addStateListener(new FlutterApp.FlutterAppListener() {
       @Override
@@ -106,14 +116,6 @@ public class FlutterConsoleLogManager {
       }
     });
 
-    assert (app.getFlutterDebugProcess() != null);
-    objectGroup = InspectorService.createGroup(app, app.getFlutterDebugProcess(), app.getVmService(), "console-group");
-    objectGroup.whenCompleteAsync((group, error) -> {
-      if (group != null) {
-        Disposer.register(app, group.getInspectorService());
-      }
-    });
-
     if (queue == null) {
       queue = QueueProcessor.createRunnableQueueProcessor();
     }
@@ -123,32 +125,66 @@ public class FlutterConsoleLogManager {
     try {
       final ExtensionData extensionData = event.getExtensionData();
       final JsonObject jsonObject = extensionData.getJson().getAsJsonObject();
-      final DiagnosticsNode diagnosticsNode = new DiagnosticsNode(jsonObject, objectGroup, app, false, null);
-
-      // Send analytics for the diagnosticsNode.
-      final String errorId = FlutterErrorHelper.getAnalyticsId(diagnosticsNode);
-      if (errorId != null) {
-        FlutterInitializer.getAnalytics().sendEvent("flutter-error", errorId);
-      }
+      final DiagnosticsNode diagnosticsNode = new DiagnosticsNode(jsonObject, app, false, null);
 
       if (FlutterSettings.getInstance().isShowStructuredErrors()) {
+        queueLength.incrementAndGet();
+
         queue.add(() -> {
           try {
             processFlutterErrorEvent(diagnosticsNode);
           }
           catch (Throwable t) {
-            LOG.warn(t);
+            if (FlutterSettings.getInstance().isVerboseLogging()) {
+              LOG.warn(t);
+            } else {
+              LOG.warn("Error processing FlutterErrorEvent: " + t.getMessage());
+            }
+          }
+          finally {
+            queueLength.decrementAndGet();
+
+            synchronized (queueLength) {
+              queueLength.notifyAll();
+            }
           }
         });
       }
     }
     catch (Throwable t) {
-      LOG.warn(t);
+      if (FlutterSettings.getInstance().isFilePathLoggingEnabled()) {
+        LOG.warn(t);
+      } else {
+        LOG.warn("Error handling FlutterErrorEvent: " + t.getMessage());
+      }
+    }
+  }
+
+  /**
+   * Wait until all pending work has completed.
+   */
+  public void flushFlutterErrorQueue() {
+    // If the queue isn't empty, then wait until the all the items have been processed.
+    if (queueLength.get() > 0) {
+      try {
+        while (queueLength.get() > 0) {
+          synchronized (queueLength) {
+            queueLength.wait();
+          }
+        }
+      }
+      catch (InterruptedException e) {
+        if (FlutterSettings.getInstance().isVerboseLogging()) {
+          LOG.error(e);
+        } else {
+          LOG.error("Exception when flushing FlutterErrorQueue: " + e.getMessage());
+        }
+      }
     }
   }
 
   private static final int errorSeparatorLength = 100;
-  private static final String errorSeparatorChar = "═";
+  private static final String errorSeparatorChar = "=";
 
   private static final ArrayList<DiagnosticsNode> emptyList = new ArrayList<>();
 
@@ -156,14 +192,14 @@ public class FlutterConsoleLogManager {
    * Pretty print the error using the available console syling attributes.
    */
   private void processFlutterErrorEvent(@NotNull DiagnosticsNode diagnosticsNode) {
-    final String description = " " + diagnosticsNode.toString() + " ";
+    final String description = " " + diagnosticsNode + " ";
+
+    final boolean terseError = !isFirstErrorForFrame() && !FlutterSettings.getInstance().isIncludeAllStackTraces();
 
     frameErrorCount++;
 
-    final boolean terseError = frameErrorCount > 1;
-
-    final String prefix = "════════";
-    final String suffix = "══";
+    final String prefix = "========";
+    final String suffix = "==";
 
     console.print("\n" + prefix, TITLE_CONTENT_TYPE);
     console.print(description, NORMAL_CONTENT_TYPE);
@@ -182,6 +218,7 @@ public class FlutterConsoleLogManager {
     }
     else {
       DiagnosticLevel lastLevel = null;
+      String errorSummary = null;
 
       for (DiagnosticsNode property : diagnosticsNode.getInlineProperties()) {
         // Add blank line between hint and non-hint properties.
@@ -193,11 +230,24 @@ public class FlutterConsoleLogManager {
 
         lastLevel = property.getLevel();
 
+        if (StringUtil.equals("ErrorSummary", property.getType())) {
+          errorSummary = property.getDescription();
+        }
+        else if (StringUtil.equals("DevToolsDeepLinkProperty", property.getType()) &&
+                 FlutterUtils.embeddedBrowserAvailable(JxBrowserManager.getInstance().getStatus())) {
+          showDeepLinkNotification(property, errorSummary);
+          continue;
+        }
+
         printDiagnosticsNodeProperty(console, "", property, null, false);
       }
     }
 
     console.print(StringUtil.repeat(errorSeparatorChar, errorSeparatorLength) + "\n", TITLE_CONTENT_TYPE);
+  }
+
+  private boolean isFirstErrorForFrame() {
+    return frameErrorCount == 0;
   }
 
   private void printTerseNodeProperty(ConsoleView console, String indent, DiagnosticsNode property) {
@@ -320,6 +370,44 @@ public class FlutterConsoleLogManager {
     }
   }
 
+  private void showDeepLinkNotification(DiagnosticsNode property, @NotNull String errorSummary) {
+    NotificationGroup group = NotificationGroupManager.getInstance().getNotificationGroup(DEEP_LINK_GROUP_ID);
+    assert group != null;
+    Notification notification = group.createNotification(errorSummary, NotificationType.INFORMATION);
+    notification.setIcon(AllIcons.General.BalloonWarning);
+    notification.addAction(new AnAction("Inspect Widget") {
+      @Override
+      public void actionPerformed(@NotNull AnActionEvent event) {
+        // Show inspector window if it's not already visible.
+        final ToolWindowManager toolWindowManager = ToolWindowManager.getInstance(app.getProject());
+        if (!(toolWindowManager instanceof ToolWindowManagerEx)) {
+          return;
+        }
+
+        final ToolWindow toolWindow = toolWindowManager.getToolWindow(InspectorView.TOOL_WINDOW_ID);
+        if (toolWindow != null && !toolWindow.isVisible()) {
+          toolWindow.show();
+        }
+
+        final String widgetId = DevToolsUtils.findWidgetId(property.getValue());
+
+        Project project = app.getProject();
+        if (!project.isDisposed()) {
+          final EmbeddedBrowser browser = FlutterUtils.embeddedBrowser(project);
+          if (browser != null && widgetId != null) {
+            browser.updatePanelToWidget(widgetId);
+          }
+        }
+
+        notification.expire();
+      }
+    });
+    Notifications.Bus.notify(notification, app.getProject());
+    try (var executor = Executors.newSingleThreadScheduledExecutor()) {
+      executor.schedule(notification::expire, 25, TimeUnit.SECONDS);
+    }
+  }
+
   private String getChildIndent(String indent, DiagnosticsNode property) {
     if (property.getStyle() == DiagnosticsTreeStyle.flat) {
       return indent;
@@ -335,27 +423,32 @@ public class FlutterConsoleLogManager {
         processLoggingEvent(event);
       }
       catch (Throwable t) {
-        LOG.warn(t);
+        if (FlutterSettings.getInstance().isVerboseLogging()) {
+          LOG.warn(t);
+        } else {
+          LOG.warn("Error processing LoggingEvent: " + t.getMessage());
+        }
       }
     });
   }
 
   private ConsoleViewContentType getContentTypeFor(DiagnosticLevel level) {
-    switch (level) {
-      case error:
-      case summary:
-        return ERROR_CONTENT_TYPE;
-      case hint:
-        return NORMAL_CONTENT_TYPE;
-      default:
-        return SUBTLE_CONTENT_TYPE;
-    }
+    return switch (level) {
+      case error, summary -> ERROR_CONTENT_TYPE;
+      case hint -> NORMAL_CONTENT_TYPE;
+      default -> SUBTLE_CONTENT_TYPE;
+    };
   }
 
   @VisibleForTesting
   public void processLoggingEvent(@NotNull Event event) {
     final LogRecord logRecord = event.getLogRecord();
     if (logRecord == null) return;
+
+    final VmService service = app.getVmService();
+    if (service == null) {
+      return;
+    }
 
     final IsolateRef isolateRef = event.getIsolate();
 
@@ -381,7 +474,7 @@ public class FlutterConsoleLogManager {
         // Handle json in the error payload.
         boolean isJson = false;
         try {
-          final JsonElement json = new JsonParser().parse(string);
+          final JsonElement json = JsonUtils.parseString(string);
           isJson = true;
 
           string = new GsonBuilder().setPrettyPrinting().create().toJson(json);
@@ -423,20 +516,11 @@ public class FlutterConsoleLogManager {
 
     if (!stackTrace.isNull()) {
       final String padding = StringUtil.repeat(" ", prefix.length());
-      final String out = stackTrace.getValueAsString().trim();
+      final String out = stackTrace.getValueAsString() == null ? "" : stackTrace.getValueAsString().trim();
 
       console.print(
         padding + out.replaceAll("\n", "\n" + padding) + "\n", ERROR_CONTENT_TYPE);
     }
-  }
-
-  private void printStackTraceToConsole(
-    @NotNull ConsoleView console, String padding, @NotNull InstanceRef stackTrace) {
-    if (stackTrace.isNull()) return;
-
-    final String out = stackTrace.getValueAsString();
-    console.print(
-      padding + out.replaceAll("\n", "\n" + padding), ERROR_CONTENT_TYPE);
   }
 
   private String stringValueFromStringRef(InstanceRef ref) {
@@ -451,8 +535,8 @@ public class FlutterConsoleLogManager {
     return ref.getValueAsString() + "...";
   }
 
-  private String getFullStringValue(@NotNull VmService service, String isolateId, @Nullable InstanceRef ref) {
-    if (ref == null) return null;
+  private @Nullable String getFullStringValue(@NotNull VmService service, @Nullable String isolateId, @Nullable InstanceRef ref) {
+    if (ref == null || isolateId == null) return null;
 
     if (!ref.getValueAsStringIsTruncated()) {
       return ref.getValueAsString();
@@ -488,10 +572,12 @@ public class FlutterConsoleLogManager {
     });
 
     try {
+      // The return can be safely ignored. An unset result will just return 0.
+      //noinspection ResultOfMethodCallIgnored
       latch.await(1, TimeUnit.SECONDS);
     }
     catch (InterruptedException e) {
-      return null;
+      // Fall through to returning an empty result.
     }
 
     return result[0];

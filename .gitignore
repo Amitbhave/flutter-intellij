@@ -1,32 +1,50 @@
+### See https://www.toptal.com/developers/gitignore ###
+### See https://github.com/JetBrains/intellij-platform-plugin-template/blob/main/.gitignore ###
+
+### IntelliJ ###
+# Covers JetBrains IDEs: IntelliJ, RubyMine, PhpStorm, AppCode, PyCharm, CLion, Android Studio, WebStorm and Rider
+# Reference: https://intellij-support.jetbrains.com/hc/en-us/articles/206544839
+
+.idea
+**/.idea
+.intellijPlatform/
+**/.intellijPlatform/
+
+# Kotlin build cache
+.kotlin
+
 .dart_tool/
 .DS_Store
 .gradle/
-.idea/workspace.xml
-.idea/libraries/Dart_*.xml
 .packages
 .pub/
-.sandbox/
 .vscode/
+.sandbox/
 artifacts/
+/bin/
 build/
 flutter-gui-tests/.gradle/
 flutter-gui-tests/guitest.log
 flutter-intellij.jar
 flutter-intellij.zip
-lib/*.jar
+third_party/lib/jxbrowser/*
+!third_party/lib/jxbrowser/jxbrowser-8.9.0.jar
+!third_party/lib/jxbrowser/jxbrowser-swing-8.9.0.jar
+!third_party/lib/java-string-similarity-2.0.0.jar
 material-design-icons/
 out/
-packages
 pubspec.lock
 releases/
-.idea/encodings.xml
-.idea/gradle.xml
-.idea/jarRepositories.xml
-.idea/kotlinc.xml
-.idea/modules/
-.idea/libraries/Gradle_*.xml
-.idea/modules.xml
-flutter-studio/testSrc/config
-flutter-studio/testSrc/failures
-flutter-studio/testSrc/system
-flutter-studio/testSrc/classpath.jar
+resources/jxbrowser/jxbrowser.properties
+.kotlin/
+flutter-studio/build/
+flutter-studio/.gradle/
+flutter-idea/build/
+flutter-idea/.gradle/
+tool/plugin/.idea
+lib/kotlin*
+
+# Gradle
+.gradle
+/build/
+gradle-app.setting

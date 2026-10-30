@@ -7,24 +7,11 @@ package io.flutter.logging;
 
 import com.google.common.annotations.VisibleForTesting;
 import com.intellij.openapi.util.text.StringUtil;
-import io.flutter.inspector.DiagnosticLevel;
-import io.flutter.inspector.DiagnosticsNode;
 
 import java.util.regex.Pattern;
 
 public class FlutterErrorHelper {
   private static final Pattern numberPattern = Pattern.compile("[0-9]+(\\.[0-9]+)?");
-
-  public static String getAnalyticsId(DiagnosticsNode node) {
-    for (DiagnosticsNode property : node.getInlineProperties()) {
-      if (property.getLevel() == DiagnosticLevel.summary) {
-        final String description = property.getDescription();
-        return getAnalyticsId(description);
-      }
-    }
-
-    return null;
-  }
 
   @VisibleForTesting
   public static String getAnalyticsId(String errorSummary) {
@@ -36,19 +23,28 @@ public class FlutterErrorHelper {
     // normalize to lower case
     String normalized = errorSummary.toLowerCase().trim();
 
+    // Ensure that asserts are broken across lines.
+    normalized = normalized.replaceAll(": failed assertion:", ":\nfailed assertion:");
+
     // If it's an assertion, remove the leading assertion path.
     final String[] lines = normalized.split("\n");
     if (lines.length >= 2 && lines[0].endsWith(".dart':") && lines[1].startsWith("failed assertion:")) {
       normalized = StringUtil.join(lines, 1, lines.length, "\n");
+      normalized = normalized.trim();
     }
 
+    // Take the first sentence.
     if (normalized.contains(". ")) {
       normalized = normalized.substring(0, normalized.indexOf(". "));
+      normalized = normalized.trim();
     }
-    normalized = normalized.trim();
+
+    // Take the first line.
     if (normalized.contains("\n")) {
       normalized = normalized.substring(0, normalized.indexOf("\n"));
     }
+
+    // Take text before the first colon.
     if (normalized.contains(":")) {
       normalized = normalized.substring(0, normalized.indexOf(":"));
     }
@@ -59,7 +55,7 @@ public class FlutterErrorHelper {
     }
 
     // remove content in parens
-    normalized = normalized.replaceAll("\\(.*\\)", "");
+    normalized = normalized.replaceAll("\\([^)]*\\)", "");
 
     // replace numbers with a string constant
     normalized = numberPattern.matcher(normalized).replaceAll("xxx");

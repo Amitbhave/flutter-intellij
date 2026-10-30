@@ -11,14 +11,15 @@ import org.jetbrains.plugins.gradle.util.GradleConstants;
 public class FlutterExternalSystemTaskNotificationListener extends ExternalSystemTaskNotificationListenerAdapter {
 
   public FlutterExternalSystemTaskNotificationListener() {
+    super(null);
   }
 
   @Override
   public void onSuccess(@NotNull ExternalSystemTaskId id) {
     if (id.getType() == ExternalSystemTaskType.RESOLVE_PROJECT && id.getProjectSystemId() == GradleConstants.SYSTEM_ID) {
-      Project project = id.findProject();
+      final Project project = id.findProject();
       if (project != null) {
-        AndroidUtils.checkDartSupport(project);
+        GradleUtils.checkDartSupport(project);
       }
     }
   }

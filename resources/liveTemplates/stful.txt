@@ -1,0 +1,13 @@
+class $NAME$ extends StatefulWidget {
+  const $NAME$({super.key});
+
+  @override
+  State<$NAME$> createState() => $SNAME$();
+}
+
+class $SNAME$ extends State<$NAME$> {
+  @override
+  Widget build(BuildContext context) {
+    return const Placeholder($END$);
+  }
+}

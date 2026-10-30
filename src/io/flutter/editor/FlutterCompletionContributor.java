@@ -7,11 +7,11 @@ package io.flutter.editor;
 
 import com.intellij.codeInsight.lookup.LookupElementBuilder;
 import com.intellij.openapi.project.Project;
+import com.intellij.openapi.util.text.StringUtil;
 import com.intellij.util.ui.ColorIcon;
 import com.intellij.util.ui.EmptyIcon;
 import com.jetbrains.lang.dart.ide.completion.DartCompletionExtension;
 import com.jetbrains.lang.dart.ide.completion.DartServerCompletionContributor;
-import org.apache.commons.lang.StringUtils;
 import org.dartlang.analysis.server.protocol.CompletionSuggestion;
 import org.dartlang.analysis.server.protocol.Element;
 import org.jetbrains.annotations.NotNull;
@@ -42,12 +42,18 @@ public class FlutterCompletionContributor extends DartCompletionExtension {
     final Element element = suggestion.getElement();
     if (element != null) {
       final String returnType = element.getReturnType();
-      if (!StringUtils.isEmpty(returnType)) {
+      if (!StringUtil.isEmpty(returnType)) {
         final String name = element.getName();
         if (name != null) {
           final String declaringType = suggestion.getDeclaringType();
           if (Objects.equals(declaringType, "Colors")) {
             final FlutterColors.FlutterColor color = FlutterColors.getColor(name);
+            if (color != null) {
+              return new ColorIcon(ICON_SIZE, color.getAWTColor());
+            }
+          }
+          else if (Objects.equals(declaringType, "CupertinoColors")) {
+            final FlutterColors.FlutterColor color = FlutterCupertinoColors.getColor(name);
             if (color != null) {
               return new ColorIcon(ICON_SIZE, color.getAWTColor());
             }

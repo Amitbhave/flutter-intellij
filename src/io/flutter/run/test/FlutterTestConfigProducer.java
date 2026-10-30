@@ -17,9 +17,7 @@ import io.flutter.FlutterUtils;
 import io.flutter.dart.DartPlugin;
 import io.flutter.pub.PubRoot;
 import io.flutter.run.FlutterRunConfigurationProducer;
-import io.flutter.sdk.FlutterSdk;
 import org.jetbrains.annotations.NotNull;
-import org.jetbrains.annotations.Nullable;
 
 /**
  * Determines when we can run a test using "flutter test".
@@ -42,7 +40,9 @@ public class FlutterTestConfigProducer extends RunConfigurationProducer<TestConf
    * Returns true if successfully set up.
    */
   @Override
-  protected boolean setupConfigurationFromContext(TestConfig config, ConfigurationContext context, Ref<PsiElement> sourceElement) {
+  protected boolean setupConfigurationFromContext(@NotNull TestConfig config,
+                                                  @NotNull ConfigurationContext context,
+                                                  @NotNull Ref<PsiElement> sourceElement) {
     if (!isFlutterContext(context)) return false;
 
     final PsiElement elt = context.getPsiLocation();
@@ -55,37 +55,30 @@ public class FlutterTestConfigProducer extends RunConfigurationProducer<TestConf
       return false;
     }
 
-    if (supportsFiltering(config.getSdk())) {
-      final String testName = testConfigUtils.findTestName(elt);
-      if (testName != null) {
-        return setupForSingleTest(config, context, file, testName);
-      }
+    final String testName = testConfigUtils.findTestName(elt);
+    if (testName != null && elt != null) {
+      final boolean hasVariant = "testWidgets".equals(elt.getText());
+      return setupForSingleTest(config, context, file, testName, hasVariant);
     }
 
     return setupForDartFile(config, context, file);
   }
 
-  private boolean supportsFiltering(@Nullable FlutterSdk sdk) {
-    return sdk != null && sdk.getVersion().flutterTestSupportsFiltering();
-  }
-
-  private boolean setupForSingleTest(TestConfig config, ConfigurationContext context, DartFile file, String testName) {
+  private boolean setupForSingleTest(@NotNull TestConfig config, ConfigurationContext context, DartFile file, String testName, boolean hasVariant) {
     final VirtualFile testFile = verifyFlutterTestFile(config, context, file);
     if (testFile == null) return false;
 
-    config.setFields(TestFields.forTestName(testName, testFile.getPath()));
+    setTestFields(config, TestFields.forTestName(testName, testFile.getPath()).useRegexp(hasVariant));
     config.setGeneratedName();
-
     return true;
   }
 
-  private boolean setupForDartFile(TestConfig config, ConfigurationContext context, DartFile file) {
+  private boolean setupForDartFile(@NotNull TestConfig config, ConfigurationContext context, DartFile file) {
     final VirtualFile testFile = verifyFlutterTestFile(config, context, file);
     if (testFile == null) return false;
 
-    config.setFields(TestFields.forFile(testFile.getPath()));
+    setTestFields(config, TestFields.forFile(testFile.getPath()));
     config.setGeneratedName();
-
     return true;
   }
 
@@ -96,22 +89,27 @@ public class FlutterTestConfigProducer extends RunConfigurationProducer<TestConf
     return FlutterUtils.isInTestDir(file) ? candidate : null;
   }
 
-  private boolean setupForDirectory(TestConfig config, PsiDirectory dir) {
+  private boolean setupForDirectory(@NotNull TestConfig config, PsiDirectory dir) {
     final PubRoot root = PubRoot.forDescendant(dir.getVirtualFile(), dir.getProject());
     if (root == null) return false;
 
     if (!root.hasTests(dir.getVirtualFile())) return false;
 
-    config.setFields(TestFields.forDir(dir.getVirtualFile().getPath()));
+    setTestFields(config, TestFields.forDir(dir.getVirtualFile().getPath()));
     config.setGeneratedName();
     return true;
+  }
+
+  private static void setTestFields(@NotNull TestConfig config, @NotNull TestFields fields) {
+    fields.setAdditionalArgs(config.getFields().getAdditionalArgs());
+    config.setFields(fields);
   }
 
   /**
    * Returns true if a run config was already created for this file. If so we will reuse it.
    */
   @Override
-  public boolean isConfigurationFromContext(TestConfig config, ConfigurationContext context) {
+  public boolean isConfigurationFromContext(TestConfig config, @NotNull ConfigurationContext context) {
     final VirtualFile fileOrDir = config.getFields().getFileOrDir();
     if (fileOrDir == null) return false;
 

@@ -6,11 +6,10 @@
 package io.flutter.run.test;
 
 import com.intellij.openapi.fileChooser.FileChooserDescriptorFactory;
-import com.intellij.openapi.options.ConfigurationException;
 import com.intellij.openapi.options.SettingsEditor;
 import com.intellij.openapi.project.Project;
 import com.intellij.openapi.ui.TextFieldWithBrowseButton;
-import com.intellij.ui.ListCellRendererWrapper;
+import com.intellij.ui.SimpleListCellRenderer;
 import io.flutter.run.test.TestFields.Scope;
 import org.jetbrains.annotations.NotNull;
 
@@ -28,7 +27,6 @@ public class TestForm extends SettingsEditor<TestConfig> {
   private JPanel form;
 
   private JComboBox<Scope> scope;
-  private JLabel scopeLabelHint;
 
   private JLabel testDirLabel;
   private TextFieldWithBrowseButton testDir;
@@ -42,6 +40,8 @@ public class TestForm extends SettingsEditor<TestConfig> {
   private JTextField testName;
   private JLabel testNameHintLabel;
 
+  private com.intellij.ui.components.fields.ExpandableTextField additionalArgs;
+
   private Scope displayedScope;
 
   TestForm(@NotNull Project project) {
@@ -51,7 +51,7 @@ public class TestForm extends SettingsEditor<TestConfig> {
       updateFields(next);
       render(next);
     });
-    scope.setRenderer(new ListCellRendererWrapper<Scope>() {
+    scope.setRenderer(new SimpleListCellRenderer<>() {
       @Override
       public void customize(final JList list,
                             final Scope value,
@@ -63,8 +63,8 @@ public class TestForm extends SettingsEditor<TestConfig> {
     });
 
     initDartFileTextWithBrowse(project, testFile);
-    testDir.addBrowseFolderListener("Test Directory", null, project,
-                                    FileChooserDescriptorFactory.createSingleFolderDescriptor());
+    testDir.addBrowseFolderListener(project, FileChooserDescriptorFactory.createSingleFolderDescriptor()
+      .withTitle("Test Directory"));
   }
 
   @NotNull
@@ -89,25 +89,18 @@ public class TestForm extends SettingsEditor<TestConfig> {
         testDir.setText(fields.getTestDir());
         break;
     }
+    additionalArgs.setText(fields.getAdditionalArgs());
     render(next);
   }
 
   @Override
-  protected void applyEditorTo(@NotNull TestConfig config) throws ConfigurationException {
-    final TestFields fields;
-    switch (getScope()) {
-      case NAME:
-        fields = TestFields.forTestName(testName.getText(), testFile.getText());
-        break;
-      case FILE:
-        fields = TestFields.forFile(testFile.getText());
-        break;
-      case DIRECTORY:
-        fields = TestFields.forDir(testDir.getText());
-        break;
-      default:
-        throw new ConfigurationException("unexpected scope: " + scope.getSelectedItem());
-    }
+  protected void applyEditorTo(@NotNull TestConfig config) {
+    final TestFields fields = switch (getScope()) {
+      case NAME -> TestFields.forTestName(testName.getText(), testFile.getText());
+      case FILE -> TestFields.forFile(testFile.getText());
+      case DIRECTORY -> TestFields.forDir(testDir.getText());
+    };
+    fields.setAdditionalArgs(additionalArgs.getText().trim());
     config.setFields(fields);
   }
 

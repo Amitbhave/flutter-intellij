@@ -5,17 +5,17 @@
  */
 package io.flutter.run.test;
 
-
 import com.intellij.execution.Location;
 import com.intellij.psi.PsiElement;
 import com.intellij.psi.PsiFile;
 import com.jetbrains.lang.dart.psi.DartCallExpression;
-import io.flutter.util.DartTestLocationProviderZ;
 import org.jetbrains.annotations.NotNull;
 import org.jetbrains.annotations.Nullable;
 
 public class FlutterTestLocationProvider extends DartTestLocationProviderZ {
   public static final FlutterTestLocationProvider INSTANCE = new FlutterTestLocationProvider();
+
+  private static final String TEST_WIDGETS = "testWidgets";
 
   private final TestConfigUtils testConfigUtils = TestConfigUtils.getInstance();
 
@@ -34,6 +34,10 @@ public class FlutterTestLocationProvider extends DartTestLocationProviderZ {
 
   @Override
   protected boolean isTest(@NotNull DartCallExpression expression) {
-    return super.isTest(expression) || testConfigUtils.asTestCall(expression) != null;
+    return super.isTest(expression) ||
+           testConfigUtils.asTestCall(expression) != null ||
+           // The previous check works if the outline has already been populated.
+           // However, if it needs to be updated then that will fail, as updating is async.
+           TEST_WIDGETS.equals(expression.getExpression().getText());
   }
 }

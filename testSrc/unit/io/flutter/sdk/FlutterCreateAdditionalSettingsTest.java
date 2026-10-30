@@ -5,13 +5,12 @@
  */
 package io.flutter.sdk;
 
-import io.flutter.module.FlutterProjectType;
-import org.junit.Test;
-
-import java.util.List;
-
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertNotEquals;
+
+import io.flutter.module.FlutterProjectType;
+import java.util.List;
+import org.junit.Test;
 
 public class FlutterCreateAdditionalSettingsTest {
   @Test
@@ -39,22 +38,19 @@ public class FlutterCreateAdditionalSettingsTest {
       new FlutterCreateAdditionalSettings.Builder().setType(FlutterProjectType.PLUGIN).build();
     final FlutterCreateAdditionalSettings additionalSettings3 =
       new FlutterCreateAdditionalSettings.Builder().setType(FlutterProjectType.PACKAGE).build();
-    final FlutterCreateAdditionalSettings additionalSettings4 =
-      new FlutterCreateAdditionalSettings.Builder().setType(null).build();
 
     final List<String> args1 = additionalSettings1.getArgs();
     final List<String> args2 = additionalSettings2.getArgs();
     final List<String> args3 = additionalSettings3.getArgs();
-    final List<String> args4 = additionalSettings4.getArgs();
 
-    int base = args4.size();
-    assertEquals(base + 2, args1.size());
+    final int base = 6;
+    assertEquals(base, args1.size());
     assertEquals("app", args1.get(1));
 
-    assertEquals(base + 2, args2.size());
+    assertEquals(base, args2.size());
     assertEquals("plugin", args2.get(1));
 
-    assertEquals(base + 2, args3.size());
+    assertEquals(base - 2, args3.size());
     assertEquals("package", args3.get(1));
   }
 
@@ -70,8 +66,8 @@ public class FlutterCreateAdditionalSettingsTest {
     final List<String> args3 = additionalSettings3.getArgs();
 
     assertEquals(args2.size() + 2, args1.size());
-    assertEquals("--description", args1.get(0));
-    assertEquals(d, args1.get(1));
+    assertEquals("--template", args1.get(0));
+    assertEquals(d, args1.get(3));
 
     assertEquals(args2.size(), args3.size());
   }
@@ -88,24 +84,8 @@ public class FlutterCreateAdditionalSettingsTest {
     final List<String> args3 = additionalSettings3.getArgs();
 
     assertEquals(args2.size() + 2, args1.size());
-    assertEquals("--org", args1.get(0));
-    assertEquals(d, args1.get(1));
-
-    assertEquals(args2.size(), args3.size());
-  }
-
-  @Test
-  public void iosPropertyTest() {
-    final FlutterCreateAdditionalSettings additionalSettings1 = new FlutterCreateAdditionalSettings.Builder().setSwift(true).build();
-    final FlutterCreateAdditionalSettings additionalSettings2 = new FlutterCreateAdditionalSettings.Builder().setSwift(false).build();
-    final FlutterCreateAdditionalSettings additionalSettings3 = new FlutterCreateAdditionalSettings.Builder().setSwift(null).build();
-
-    final List<String> args1 = additionalSettings1.getArgs();
-    final List<String> args2 = additionalSettings2.getArgs();
-    final List<String> args3 = additionalSettings3.getArgs();
-
-    assertEquals(3, args1.size());
-    assertNotEquals("--ios-language", args1.get(0));
+    assertEquals("--org", args1.get(2));
+    assertEquals(d, args1.get(3));
 
     assertEquals(args2.size(), args3.size());
   }
@@ -127,12 +107,61 @@ public class FlutterCreateAdditionalSettingsTest {
   }
 
   @Test
+  public void testPlatforms() {
+    // None of the non-platform tests set these properties so they all implicitly test the case where all are null.
+    final FlutterCreateAdditionalSettings additionalSettings = new FlutterCreateAdditionalSettings.Builder()
+      .setPlatformAndroid(true)
+      .setPlatformIos(true)
+      .setPlatformLinux(true)
+      .setPlatformMacos(true)
+      .setPlatformWeb(true)
+      .setPlatformWindows(true)
+      .build();
+    final List<String> args = additionalSettings.getArgs();
+    assertEquals(6, args.size());
+    assertEquals("--platforms", args.get(4));
+    assertEquals("android,ios,web,linux,macos,windows", args.get(5));
+  }
+
+  @Test
+  public void testPartialPlatforms() {
+    final FlutterCreateAdditionalSettings additionalSettings = new FlutterCreateAdditionalSettings.Builder()
+      .setPlatformIos(true)
+      .setPlatformMacos(true)
+      .setPlatformWindows(true)
+      .build();
+    final List<String> args = additionalSettings.getArgs();
+    assertEquals(6, args.size());
+    assertEquals("--platforms", args.get(4));
+    assertEquals("ios,macos,windows", args.get(5));
+  }
+
+  @Test
+  public void testSinglePlatforms() {
+    final FlutterCreateAdditionalSettings additionalSettings = new FlutterCreateAdditionalSettings.Builder()
+      .setPlatformAndroid(true)
+      .build();
+    final List<String> args = additionalSettings.getArgs();
+    assertEquals(6, args.size());
+    assertEquals("--platforms", args.get(4));
+    assertEquals("android", args.get(5));
+  }
+
+  @Test
+  public void testNoPlatforms() {
+    final FlutterCreateAdditionalSettings additionalSettings = new FlutterCreateAdditionalSettings.Builder()
+      .setPlatformAndroid(false)
+      .build();
+    final List<String> args = additionalSettings.getArgs();
+    assertEquals(6, args.size());
+  }
+
+  @Test
   public void testMultipleProperties() {
     final FlutterCreateAdditionalSettings additionalSettings = new FlutterCreateAdditionalSettings.Builder()
       .setOrg("tld.domain")
       .setType(FlutterProjectType.PLUGIN)
       .setDescription("a b c")
-      .setSwift(true)
       .setKotlin(true)
       .build();
 
@@ -140,7 +169,7 @@ public class FlutterCreateAdditionalSettingsTest {
 
     final String line = String.join(" ", args);
 
-    assertEquals(7, args.size());
-    assertEquals("--template plugin --description a b c --org tld.domain --no-androidx", line);
+    assertEquals(8, args.size());
+    assertEquals("--template plugin --description a b c --org tld.domain --platforms android,ios", line);
   }
 }

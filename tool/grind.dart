@@ -2,128 +2,118 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-import 'dart:convert';
 import 'dart:io';
 
 import 'package:grinder/grinder.dart';
 import 'package:http/http.dart' as http;
 
-main(List<String> args) => grind(args);
+void main(List<String> args) => grind(args);
 
-@Task('Check plugin URLs for liveness')
-checkUrls() async {
-  log('checking URLs in FlutterBundle.properties...');
-  var lines =
-      await new File('src/io/flutter/FlutterBundle.properties').readAsLines();
-  for (var line in lines) {
-    var split = line.split('=');
-    if (split.length == 2) {
-      // flutter.io.gettingStarted.url | flutter.analytics.privacyUrl
-      if (split[0].toLowerCase().endsWith('url')) {
-        var url = split[1];
-        var response = await http.get(url);
-        log('checking: $url...');
-        if (response.statusCode != 200) {
-          fail(
-              '$url GET failed: [${response.statusCode}] ${response.reasonPhrase}');
+@Task('Check plugin and documentation URLs for liveness')
+Future<void> checkUrls() async {
+  var client = http.Client();
+  var failedUrls = <String>[];
+  var headers = {
+    'User-Agent': 'Mozilla/5.0 (flutter-intellij CI link check)',
+  };
+
+  Future<void> verifyUrl(String url, String source) async {
+    log('checking: $url...');
+    try {
+      var response = await client
+          .get(Uri.parse(url), headers: headers)
+          .timeout(const Duration(seconds: 15));
+      if (response.statusCode >= 400) {
+        failedUrls.add(
+          '$source: $url GET failed [${response.statusCode}] ${response.reasonPhrase}',
+        );
+      }
+    } catch (e) {
+      failedUrls.add('$source: $url failed with exception: $e');
+    }
+  }
+
+  try {
+    log('checking URLs in FlutterBundle.properties...');
+    var bundleFile = File('src/io/flutter/FlutterBundle.properties');
+    if (bundleFile.existsSync()) {
+      var lines = await bundleFile.readAsLines();
+      for (var line in lines) {
+        var trimmed = line.trim();
+        if (trimmed.isEmpty ||
+            trimmed.startsWith('#') ||
+            trimmed.startsWith('!')) {
+          continue;
+        }
+        var eqIndex = trimmed.indexOf('=');
+        if (eqIndex != -1) {
+          var key = trimmed.substring(0, eqIndex).trim();
+          if (key.toLowerCase().endsWith('url')) {
+            var url = trimmed.substring(eqIndex + 1).trim();
+            if (url.isNotEmpty) {
+              await verifyUrl(url, 'FlutterBundle.properties');
+            }
+          }
         }
       }
     }
-  }
-  log('OK!');
-}
 
-@Task()
-@Depends(colors, icons)
-generate() => null;
+    var docFiles = [
+      'CONTRIBUTING.md',
+      'README.md',
+      'CODE_OF_CONDUCT.md',
+    ];
+    var urlRegex = RegExp(r'https?://[^\s\)\]\>\"`]+');
 
-@Task('Generate Flutter color information')
-colors() async {
-  final String kUrl = 'https://raw.githubusercontent.com/flutter/flutter/'
-      'master/packages/flutter/lib/src/material/colors.dart';
-
-  // Get color file from flutter.
-  HttpClientRequest request = await new HttpClient().getUrl(Uri.parse(kUrl));
-  HttpClientResponse response = await request.close();
-  List<String> data = await utf8.decoder.bind(response).toList();
-
-  // Remove an import and define the Color class.
-  String str = data.join('');
-  str = str.replaceFirst(
-      "import 'dart:ui' show Color;", "import 'colors_main.dart';");
-  str = str.replaceFirst("import 'package:flutter/painting.dart';", '');
-  File file = new File('tool/colors/colors.dart');
-  file.writeAsStringSync(str);
-
-  // Run tool/color/colors_main.dart, pipe output to //resources/flutter/color.properties.
-  ProcessResult result = Process.runSync(
-      Platform.resolvedExecutable, ['tool/colors/colors_main.dart']);
-  if (result.exitCode != 0) {
-    fail('${result.stdout}\n${result.stderr}');
-  }
-  File outFile = new File('resources/flutter/colors.properties');
-  outFile.writeAsStringSync(result.stdout.toString());
-  log('wrote ${outFile.path}');
-}
-
-@Task('Generate Flutter icon information')
-icons() async {
-  // Run tool/icons/update_icons.dart.
-  await Dart.runAsync('tool/icons/update_icons.dart');
-}
-
-@Task('Create Outline view icons from svgs')
-outlineIcons() async {
-  Directory previewIconsDir = getDir('resources/icons/preview');
-
-  log('using svgexport (npm install -g svgexport)');
-
-  for (File file in previewIconsDir
-      .listSync()
-      .where((entity) => entity is File)
-      .cast<File>()
-      .where((file) => file.path.endsWith('.svg'))) {
-    log('processing ${file.path}...');
-
-    String name = fileName(file);
-    name = name.substring(0, name.indexOf('.'));
-    _createPng(file, '$name.png', size: 28, forLight: true);
-    _createPng(file, '$name@2x.png', size: 56, forLight: true);
-    _createPng(file, '${name}_dark.png', size: 28, forLight: false);
-    _createPng(file, '$name@2x_dark.png', size: 56, forLight: false);
-  }
-}
-
-void _createPng(
-  File sourceSvg,
-  String targetName, {
-  int size: 28,
-  bool forLight: false,
-}) {
-  File targetFile = joinFile(sourceSvg.parent, [targetName]);
-
-  String color = forLight ? '#7a7a7a' : '#9e9e9e';
-
-  String originalContent = sourceSvg.readAsStringSync();
-  String newContent =
-      originalContent.replaceAll('<svg ', '<svg fill="$color" ');
-
-  sourceSvg.writeAsStringSync(newContent);
-
-  try {
-    ProcessResult result = Process.runSync('svgexport', [
-      sourceSvg.path,
-      targetFile.path,
-      '100%',
-      '$size:$size',
-    ]);
-
-    if (result.exitCode != 0) {
-      print(
-          'Error resizing image with imagemagick: ${result.stdout}\n${result.stderr}');
-      exit(1);
+    for (var docPath in docFiles) {
+      var file = File(docPath);
+      if (!file.existsSync()) continue;
+      log('checking URLs in $docPath...');
+      var content = await file.readAsString();
+      var urls = <String>{};
+      for (var match in urlRegex.allMatches(content)) {
+        var url = match.group(0)!;
+        while (url.endsWith('.') ||
+            url.endsWith(',') ||
+            url.endsWith(';') ||
+            url.endsWith(':')) {
+          url = url.substring(0, url.length - 1);
+        }
+        if (url.contains('<') ||
+            url.contains('>') ||
+            url.contains('localhost')) {
+          continue;
+        }
+        urls.add(url);
+      }
+      for (var url in urls) {
+        await verifyUrl(url, docPath);
+      }
     }
+
+    if (failedUrls.isNotEmpty) {
+      fail('The following URLs failed:\n${failedUrls.join('\n')}');
+    }
+    log('OK!');
   } finally {
-    sourceSvg.writeAsStringSync(originalContent);
+    client.close();
+  }
+}
+
+@Task('Validate agent skills with skills_lint')
+Future<void> lintSkills() async {
+  log('validating agent skills...');
+  var result = await Process.run(
+    Platform.executable,
+    ['run', 'skills_lint', '--config', 'tool/skills_lint.yaml'],
+  );
+  if (result.stdout.toString().isNotEmpty) {
+    log(result.stdout.toString().trim());
+  }
+  if (result.stderr.toString().isNotEmpty) {
+    log(result.stderr.toString().trim());
+  }
+  if (result.exitCode != 0) {
+    fail('skills_lint failed with exit code ${result.exitCode}');
   }
 }

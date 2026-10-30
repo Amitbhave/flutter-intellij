@@ -15,6 +15,7 @@ import com.intellij.xdebugger.frame.XStackFrame;
 import com.intellij.xdebugger.frame.XSuspendContext;
 import com.intellij.xdebugger.frame.XValue;
 import com.jetbrains.lang.dart.ide.runner.DartExceptionBreakpointProperties;
+import io.flutter.logging.PluginLogger;
 import io.flutter.vmService.frame.DartVmServiceSuspendContext;
 import io.flutter.vmService.frame.DartVmServiceValue;
 import org.dartlang.vm.service.VmServiceListener;
@@ -23,7 +24,7 @@ import org.jetbrains.annotations.NotNull;
 import org.jetbrains.annotations.Nullable;
 
 public class DartVmServiceListener implements VmServiceListener {
-  private static final Logger LOG = Logger.getInstance(DartVmServiceListener.class.getName());
+  private static final @NotNull Logger LOG = PluginLogger.createLogger(DartVmServiceListener.class);
 
   @NotNull private final DartVmServiceDebugProcess myDebugProcess;
   @NotNull private final DartVmServiceBreakpointHandler myBreakpointHandler;
@@ -40,7 +41,6 @@ public class DartVmServiceListener implements VmServiceListener {
 
   }
 
-  @SuppressWarnings("DuplicateBranchesInSwitch")
   @Override
   public void received(@NotNull final String streamId, @NotNull final Event event) {
     switch (event.getKind()) {
@@ -140,8 +140,9 @@ public class DartVmServiceListener implements VmServiceListener {
       final StepOption latestStep = myDebugProcess.getVmServiceWrapper().getLatestStep();
 
       if (latestStep == StepOption.Over && equalSourcePositions(myLatestSourcePosition, sourcePosition)) {
+        final StepOption nextStep = atAsyncSuspension ? StepOption.OverAsyncSuspension : latestStep;
         // continue stepping to change current line
-        myDebugProcess.getVmServiceWrapper().resumeIsolate(isolateRef.getId(), latestStep);
+        myDebugProcess.getVmServiceWrapper().resumeIsolate(isolateRef.getId(), nextStep);
       }
       else if (exception != null) {
         final XBreakpoint<DartExceptionBreakpointProperties> breakpoint =
@@ -231,19 +232,9 @@ public class DartVmServiceListener implements VmServiceListener {
   @NotNull
   private static String getSimpleStringPresentation(@NotNull final InstanceRef instanceRef) {
     // getValueAsString() is provided for the instance kinds: Null, Bool, Double, Int, String (value may be truncated), Float32x4, Float64x2, Int32x4, StackTrace
-    switch (instanceRef.getKind()) {
-      case Null:
-      case Bool:
-      case Double:
-      case Int:
-      case String:
-      case Float32x4:
-      case Float64x2:
-      case Int32x4:
-      case StackTrace:
-        return instanceRef.getValueAsString();
-      default:
-        return "Instance of " + instanceRef.getClassRef().getName();
-    }
+    return switch (instanceRef.getKind()) {
+      case Null, Bool, Double, Int, String, Float32x4, Float64x2, Int32x4, StackTrace -> instanceRef.getValueAsString();
+      default -> "Instance of " + instanceRef.getClassRef().getName();
+    };
   }
 }

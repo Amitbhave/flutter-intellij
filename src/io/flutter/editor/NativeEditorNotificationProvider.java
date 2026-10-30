@@ -5,96 +5,83 @@
  */
 package io.flutter.editor;
 
-import com.intellij.openapi.actionSystem.*;
-import com.intellij.openapi.editor.colors.EditorColors;
+import com.intellij.openapi.actionSystem.ActionManager;
+import com.intellij.openapi.actionSystem.ActionPlaces;
+import com.intellij.openapi.actionSystem.ActionUiKind;
+import com.intellij.openapi.actionSystem.AnAction;
+import com.intellij.openapi.actionSystem.AnActionEvent;
+import com.intellij.openapi.actionSystem.CommonDataKeys;
+import com.intellij.openapi.actionSystem.DataContext;
+import com.intellij.openapi.actionSystem.impl.SimpleDataContext;
 import com.intellij.openapi.fileEditor.FileEditor;
-import com.intellij.openapi.project.DumbAware;
 import com.intellij.openapi.project.Project;
-import com.intellij.openapi.util.Key;
+import com.intellij.openapi.project.ProjectUtil;
+import com.intellij.openapi.util.SystemInfo;
 import com.intellij.openapi.util.io.FileUtil;
 import com.intellij.openapi.vfs.VirtualFile;
 import com.intellij.ui.EditorNotificationPanel;
+import com.intellij.ui.EditorNotificationProvider;
 import com.intellij.ui.EditorNotifications;
 import icons.FlutterIcons;
 import io.flutter.FlutterBundle;
+import io.flutter.utils.UIUtils;
 import org.jetbrains.annotations.NotNull;
 import org.jetbrains.annotations.Nullable;
 
-// TODO(devoncarew): Are we showing the 'Open in Xcode' editor action on non-mac platforms?
+import javax.swing.JComponent;
+import java.util.function.Function;
 
-public class NativeEditorNotificationProvider extends EditorNotifications.Provider<EditorNotificationPanel> implements DumbAware {
-  private static final Key<EditorNotificationPanel> KEY = Key.create("flutter.native.editor.notification");
-
-  private final Project myProject;
+public class NativeEditorNotificationProvider implements EditorNotificationProvider {
+  private final Project project;
   private boolean showNotification = true;
 
   public NativeEditorNotificationProvider(@NotNull Project project) {
-    myProject = project;
+    this.project = project;
   }
 
-  @NotNull
   @Override
-  public Key<EditorNotificationPanel> getKey() {
-    return KEY;
-  }
-
-  @Nullable
-  @Override
-  public EditorNotificationPanel createNotificationPanel(@NotNull VirtualFile file, @NotNull FileEditor fileEditor) {
+  public @Nullable Function<? super @NotNull FileEditor, ? extends @Nullable JComponent> collectNotificationData(@NotNull Project project,
+                                                                                                                 @NotNull VirtualFile file) {
     if (!file.isInLocalFileSystem() || !showNotification) {
       return null;
     }
-    return createPanelForFile(file, findRootDir(file, myProject.getBaseDir()));
-  }
 
-  private EditorNotificationPanel createPanelForFile(VirtualFile file, VirtualFile root) {
+    VirtualFile root = ProjectUtil.guessProjectDir(project);
     if (root == null) {
       return null;
     }
-    return createPanelForAction(file, root, getActionName(root));
-  }
-
-  private EditorNotificationPanel createPanelForAction(VirtualFile file, VirtualFile root, String actionName) {
-    if (actionName == null) {
-      return null;
-    }
-    final NativeEditorActionsPanel panel = new NativeEditorActionsPanel(file, root, actionName);
-    return panel.isValidForFile() ? panel : null;
-  }
-
-  private static String getActionName(VirtualFile root) {
-    if (root == null) {
-      return null;
-    }
-
-    if (root.getName().equals("android")) {
-      return "flutter.androidstudio.open";
-    }
-    else if (root.getName().equals("ios")) {
-      return "flutter.xcode.open";
-    }
-    else {
-      return null;
-    }
+    return fileEditor -> createPanelForAction(fileEditor, root, getActionName(root));
   }
 
   @Nullable
-  private static VirtualFile findRootDir(@NotNull VirtualFile file, @Nullable VirtualFile projectDir) {
-    if (projectDir == null) {
+  private EditorNotificationPanel createPanelForAction(@NotNull FileEditor fileEditor,
+                                                       @NotNull VirtualFile root,
+                                                       @Nullable String actionName) {
+    if (actionName == null) {
       return null;
     }
-    // Return the top-most parent of file that is a child of the project directory.
-    VirtualFile parent = file.getParent();
-    if (projectDir.equals(parent)) {
+    final NativeEditorActionsPanel panel = new NativeEditorActionsPanel(fileEditor, root, actionName);
+    return panel.isValidForFile() ? panel : null;
+  }
+
+  @Nullable
+  private static String getActionName(@Nullable VirtualFile root) {
+    if (root == null) {
       return null;
     }
-    VirtualFile root = parent;
-    while (parent != null) {
-      parent = parent.getParent();
-      if (projectDir.equals(parent)) {
-        return root;
+
+    // See https://github.com/flutter/flutter-intellij/issues/7103
+    //if (root.getName().equals("android")) {
+    //  return "flutter.androidstudio.open";
+    //}
+    //else
+    if (SystemInfo.isMac) {
+      if (root.getName().equals("ios")) {
+        return "flutter.xcode.open";
       }
-      root = parent;
+      else if (root.getName().equals("macos")) {
+        return "flutter.xcode.open";
+      }
     }
     return null;
   }
@@ -105,9 +92,9 @@ public class NativeEditorNotificationProvider extends EditorNotifications.Provid
     final AnAction myAction;
     final boolean isVisible;
 
-    NativeEditorActionsPanel(VirtualFile file, VirtualFile root, String actionName) {
-      super(EditorColors.GUTTER_BACKGROUND);
-      myFile = file;
+    NativeEditorActionsPanel(@NotNull FileEditor fileEditor, @NotNull VirtualFile root, @NotNull String actionName) {
+      super(UIUtils.getEditorNotificationBackgroundColor());
+      myFile = fileEditor.getFile();
       myRoot = root;
       myAction = ActionManager.getInstance().getAction(actionName);
 
@@ -115,13 +102,16 @@ public class NativeEditorNotificationProvider extends EditorNotifications.Provid
       text("Flutter commands");
 
       // Ensure this project is a Flutter project by updating the menu action. It will only be visible for Flutter projects.
-      myAction.update(AnActionEvent.createFromDataContext(ActionPlaces.EDITOR_TOOLBAR, myAction.getTemplatePresentation(), makeContext()));
+      myAction.update(
+        AnActionEvent.createEvent(makeContext(), myAction.getTemplatePresentation(), ActionPlaces.EDITOR_TOOLBAR, ActionUiKind.NONE, null));
+
       isVisible = myAction.getTemplatePresentation().isVisible();
+      //noinspection DialogTitleCapitalization
       createActionLabel(myAction.getTemplatePresentation().getText(), this::performAction)
         .setToolTipText(myAction.getTemplatePresentation().getDescription());
       createActionLabel(FlutterBundle.message("flutter.androidstudio.open.hide.notification.text"), () -> {
         showNotification = false;
-        EditorNotifications.getInstance(myProject).updateAllNotifications();
+        EditorNotifications.getInstance(project).updateAllNotifications();
       }).setToolTipText(FlutterBundle.message("flutter.androidstudio.open.hide.notification.description"));
     }
 
@@ -136,19 +126,11 @@ public class NativeEditorNotificationProvider extends EditorNotifications.Provid
     private void performAction() {
       // Open Xcode or Android Studio. If already running AS then just open a new window.
       myAction.actionPerformed(
-        AnActionEvent.createFromDataContext(ActionPlaces.EDITOR_TOOLBAR, myAction.getTemplatePresentation(), makeContext()));
+        AnActionEvent.createEvent(makeContext(), myAction.getTemplatePresentation(), ActionPlaces.EDITOR_TOOLBAR, ActionUiKind.NONE, null));
     }
 
     private DataContext makeContext() {
-      return dataId -> {
-        if (CommonDataKeys.VIRTUAL_FILE.is(dataId)) {
-          return myFile;
-        }
-        if (CommonDataKeys.PROJECT.is(dataId)) {
-          return myProject;
-        }
-        return null;
-      };
+      return SimpleDataContext.builder().add(CommonDataKeys.VIRTUAL_FILE, myFile).add(CommonDataKeys.PROJECT, project).build();
     }
   }
 }

@@ -5,30 +5,22 @@
  */
 package io.flutter.sdk;
 
-import com.intellij.openapi.application.ApplicationManager;
 import com.intellij.openapi.application.WriteAction;
 import com.intellij.openapi.module.Module;
-import com.intellij.openapi.module.ModuleManager;
 import com.intellij.openapi.project.DumbService;
 import com.intellij.openapi.project.Project;
-import com.intellij.openapi.roots.LibraryOrderEntry;
-import com.intellij.openapi.roots.ModifiableRootModel;
-import com.intellij.openapi.roots.ModuleRootManager;
-import com.intellij.openapi.roots.OrderEntry;
-import com.intellij.openapi.roots.OrderRootType;
+import com.intellij.openapi.roots.*;
 import com.intellij.openapi.roots.impl.libraries.LibraryEx;
-import com.intellij.openapi.roots.libraries.Library;
-import com.intellij.openapi.roots.libraries.LibraryProperties;
-import com.intellij.openapi.roots.libraries.LibraryTable;
-import com.intellij.openapi.roots.libraries.LibraryTablesRegistrar;
-import com.intellij.openapi.roots.libraries.PersistentLibraryKind;
+import com.intellij.openapi.roots.libraries.*;
 import com.intellij.openapi.util.text.StringUtil;
 import io.flutter.utils.FlutterModuleUtils;
+import io.flutter.utils.OpenApiUtils;
+import org.jetbrains.annotations.NotNull;
+import org.jetbrains.annotations.Nullable;
+
 import java.util.Arrays;
 import java.util.HashSet;
 import java.util.Set;
-import org.jetbrains.annotations.NotNull;
-import org.jetbrains.annotations.Nullable;
 
 /**
  * The shared code for managing a library. To use it, define a subclass that implements the required methods,
@@ -49,7 +41,8 @@ public abstract class AbstractLibraryManager<K extends LibraryProperties> {
   protected void updateLibraryContent(@NotNull Set<String> contentUrls) {
     if (!FlutterModuleUtils.declaresFlutter(project)) {
       // If we have a Flutter library, remove it.
-      final LibraryTable libraryTable = LibraryTablesRegistrar.getInstance().getLibraryTable(project);
+      final LibraryTable libraryTable = OpenApiUtils.getLibraryTable(project);
+      if (libraryTable == null) return;
       final Library existingLibrary = getLibraryByName(getLibraryName());
       if (existingLibrary != null) {
         WriteAction.compute(() -> {
@@ -66,9 +59,11 @@ public abstract class AbstractLibraryManager<K extends LibraryProperties> {
 
   protected void updateLibraryContent(@NotNull String name,
                                       @NotNull Set<String> contentUrls,
-                                      @SuppressWarnings("unused") @Nullable Set<String> sourceUrls) {
+                                      @Nullable Set<String> sourceUrls) {
     // TODO(messick) Add support for source URLs.
-    final LibraryTable libraryTable = LibraryTablesRegistrar.getInstance().getLibraryTable(project);
+    final LibraryTable libraryTable = OpenApiUtils.getLibraryTable(project);
+    if (libraryTable == null) return;
+
     final Library existingLibrary = getLibraryByName(name);
 
     final Library library = existingLibrary != null
@@ -88,7 +83,7 @@ public abstract class AbstractLibraryManager<K extends LibraryProperties> {
       return;
     }
 
-    ApplicationManager.getApplication().runWriteAction(() -> {
+    OpenApiUtils.safeRunWriteAction(() -> {
       final LibraryEx.ModifiableModelEx model = (LibraryEx.ModifiableModelEx)library.getModifiableModel();
 
       final Set<String> existingCopy = new HashSet<>(existingUrls);
@@ -103,14 +98,16 @@ public abstract class AbstractLibraryManager<K extends LibraryProperties> {
         model.addRoot(url, OrderRootType.CLASSES);
       }
 
-      DumbService.getInstance(project).runWhenSmart(() -> ApplicationManager.getApplication().runWriteAction(() -> model.commit()));
+      DumbService.getInstance(project).runWhenSmart(() -> {
+        OpenApiUtils.safeRunWriteAction(model::commit);
+      });
     });
 
     updateModuleLibraryDependencies(library);
   }
 
   protected void updateModuleLibraryDependencies(@NotNull Library library) {
-    for (final Module module : ModuleManager.getInstance(project).getModules()) {
+    for (final Module module : OpenApiUtils.getModules(project)) {
       if (FlutterModuleUtils.declaresFlutter(module)) {
         addFlutterLibraryDependency(module, library);
       }
@@ -145,7 +142,7 @@ public abstract class AbstractLibraryManager<K extends LibraryProperties> {
 
       modifiableModel.addLibraryEntry(library);
 
-      ApplicationManager.getApplication().invokeAndWait(() -> WriteAction.run(modifiableModel::commit));
+      OpenApiUtils.safeInvokeAndWait(() -> WriteAction.run(modifiableModel::commit));
     }
     finally {
       if (!modifiableModel.isDisposed()) {
@@ -170,7 +167,7 @@ public abstract class AbstractLibraryManager<K extends LibraryProperties> {
       }
 
       if (wasFound) {
-        ApplicationManager.getApplication().invokeAndWait(() -> WriteAction.run(modifiableModel::commit));
+        OpenApiUtils.safeInvokeAndWait(() -> WriteAction.run(modifiableModel::commit));
       }
     }
     finally {
@@ -181,7 +178,8 @@ public abstract class AbstractLibraryManager<K extends LibraryProperties> {
   }
 
   @Nullable
-  private Library getLibraryByName(String name) {
-    return LibraryTablesRegistrar.getInstance().getLibraryTable(project).getLibraryByName(name);
+  private Library getLibraryByName(@NotNull String name) {
+    var libraryTable = OpenApiUtils.getLibraryTable(project);
+    return libraryTable == null ? null : libraryTable.getLibraryByName(name);
   }
 }

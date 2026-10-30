@@ -6,7 +6,6 @@
 package io.flutter.android;
 
 import com.intellij.openapi.application.ApplicationManager;
-import com.intellij.openapi.diagnostic.Logger;
 import com.intellij.openapi.project.Project;
 import com.intellij.openapi.projectRoots.ProjectJdkTable;
 import com.intellij.openapi.projectRoots.Sdk;
@@ -20,12 +19,12 @@ import org.jetbrains.annotations.Nullable;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Objects;
 
 /**
  * An Android SDK and its home directory; this references an IntelliJ @{@link Sdk} instance.
  */
 public class IntelliJAndroidSdk {
-  private static final Logger LOG = Logger.getInstance(IntelliJAndroidSdk.class);
 
   @NotNull
   private final Sdk sdk;
@@ -50,10 +49,14 @@ public class IntelliJAndroidSdk {
    * Changes the project's Java SDK to this one.
    */
   public void setCurrent(@NotNull Project project) {
-    assert ApplicationManager.getApplication().isWriteAccessAllowed();
+    var application = ApplicationManager.getApplication();
+    assert application != null;
+    assert application.isWriteAccessAllowed();
 
     final ProjectRootManager roots = ProjectRootManager.getInstance(project);
-    roots.setProjectSdk(sdk);
+    if (roots != null) {
+      roots.setProjectSdk(sdk);
+    }
   }
 
   /**
@@ -61,7 +64,10 @@ public class IntelliJAndroidSdk {
    */
   @Nullable
   public static IntelliJAndroidSdk fromProject(@NotNull Project project) {
-    final Sdk candidate = ProjectRootManager.getInstance(project).getProjectSdk();
+    var manager = ProjectRootManager.getInstance(project);
+    if (manager == null) return null;
+
+    final Sdk candidate = manager.getProjectSdk();
     return fromSdk(candidate);
   }
 
@@ -90,7 +96,7 @@ public class IntelliJAndroidSdk {
   @Nullable
   public static IntelliJAndroidSdk fromHome(VirtualFile file) {
     for (IntelliJAndroidSdk candidate : findAll()) {
-      if (file.equals(candidate.getHome())) {
+      if (candidate != null && Objects.equals(file, candidate.getHome())) {
         return candidate;
       }
     }
@@ -101,7 +107,7 @@ public class IntelliJAndroidSdk {
   /**
    * Returns the best value of the Android SDK location to use, including possibly querying flutter tools for it.
    */
-  public static String chooseAndroidHome(@Nullable Project project, boolean askFlutterTools) {
+  public static @Nullable String chooseAndroidHome(@Nullable Project project, boolean askFlutterTools) {
     if (project == null) {
       return EnvironmentUtil.getValue("ANDROID_HOME");
     }
@@ -131,10 +137,13 @@ public class IntelliJAndroidSdk {
   @NotNull
   private static List<IntelliJAndroidSdk> findAll() {
     final List<IntelliJAndroidSdk> result = new ArrayList<>();
-    for (Sdk sdk : ProjectJdkTable.getInstance().getAllJdks()) {
-      final IntelliJAndroidSdk candidate = IntelliJAndroidSdk.fromSdk(sdk);
-      if (candidate != null) {
-        result.add(candidate);
+    var jdkTable = ProjectJdkTable.getInstance();
+    if (jdkTable != null) {
+      for (Sdk sdk : jdkTable.getAllJdks()) {
+        final IntelliJAndroidSdk candidate = IntelliJAndroidSdk.fromSdk(sdk);
+        if (candidate != null) {
+          result.add(candidate);
+        }
       }
     }
     return result;

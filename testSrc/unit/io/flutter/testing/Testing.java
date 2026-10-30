@@ -5,28 +5,26 @@
  */
 package io.flutter.testing;
 
-import com.intellij.idea.IdeaTestApplication;
 import com.intellij.openapi.application.Application;
 import com.intellij.openapi.application.ApplicationManager;
-import com.intellij.openapi.application.TransactionGuard;
 import com.intellij.openapi.util.ThrowableComputable;
 import com.intellij.testFramework.builders.EmptyModuleFixtureBuilder;
 import com.intellij.testFramework.fixtures.IdeaProjectTestFixture;
 import com.intellij.testFramework.fixtures.IdeaTestFixtureFactory;
 import com.intellij.testFramework.fixtures.TestFixtureBuilder;
+import io.flutter.utils.OpenApiUtils;
+import org.jetbrains.annotations.NotNull;
+
+import javax.swing.*;
 import java.lang.reflect.InvocationTargetException;
+import java.util.Objects;
 import java.util.concurrent.atomic.AtomicReference;
-import javax.swing.SwingUtilities;
 
 /**
  * Test utilities.
  */
+@SuppressWarnings("ConstantConditions")
 public class Testing {
-
-  static {
-    // Initialize the application.
-    IdeaTestApplication.getInstance();
-  }
 
   private Testing() {
   }
@@ -38,7 +36,7 @@ public class Testing {
    */
   public static IdeaProjectFixture makeEmptyProject() {
     return new IdeaProjectFixture(
-      (x) -> IdeaTestFixtureFactory.getFixtureFactory().createLightFixtureBuilder().getFixture(), true);
+      (x) -> IdeaTestFixtureFactory.getFixtureFactory().createLightFixtureBuilder("test").getFixture(), true);
   }
 
   /**
@@ -56,7 +54,7 @@ public class Testing {
   public static CodeInsightProjectFixture makeCodeInsightModule() {
     return new CodeInsightProjectFixture((x) -> {
       final IdeaTestFixtureFactory factory = IdeaTestFixtureFactory.getFixtureFactory();
-      final IdeaProjectTestFixture light = factory.createLightFixtureBuilder().getFixture();
+      final IdeaProjectTestFixture light = factory.createLightFixtureBuilder("test").getFixture();
       return factory.createCodeInsightFixture(light);
     }, false);
   }
@@ -74,7 +72,7 @@ public class Testing {
       callback.run();
       return null;
     };
-    runOnDispatchThread(() -> ApplicationManager.getApplication().runWriteAction(action));
+    runOnDispatchThread(() -> OpenApiUtils.safeRunWriteAction(action));
   }
 
   public static <T> T computeOnDispatchThread(ThrowableComputable<T, Exception> callback) throws Exception {
@@ -83,26 +81,33 @@ public class Testing {
     return result.get();
   }
 
-  public static void runOnDispatchThread(RunnableThatThrows callback) throws Exception {
+  public static void runOnDispatchThread(@NotNull RunnableThatThrows callback) throws Exception {
     try {
       final AtomicReference<Exception> ex = new AtomicReference<>();
       assert (!SwingUtilities.isEventDispatchThread());
 
-      TransactionGuard.getInstance().submitTransactionAndWait(() -> {
+      OpenApiUtils.safeInvokeAndWait(() -> {
         try {
           callback.run();
         }
         catch (Exception e) {
           ex.set(e);
         }
+        catch (AssertionError e) {
+          // Sometimes, the SDK leak detector fires, but we do not care since we do not use Android or Java SDKs.
+          final String msg = e.getMessage();
+          if (msg == null || !msg.startsWith("Leaked SDKs")) {
+            throw e;
+          }
+        }
       });
       if (ex.get() != null) {
-        throw ex.get();
+        throw Objects.requireNonNull(ex.get());
       }
     }
     catch (InvocationTargetException e) {
       if (e.getCause() instanceof AssertionError) {
-        throw (AssertionError)e.getCause();
+        throw (AssertionError)Objects.requireNonNull(e.getCause());
       }
     }
   }

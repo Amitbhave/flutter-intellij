@@ -5,20 +5,15 @@
  */
 package io.flutter.pub;
 
-import com.intellij.openapi.components.ServiceManager;
 import com.intellij.openapi.module.Module;
-import com.intellij.openapi.module.ModuleManager;
 import com.intellij.openapi.project.Project;
-import com.intellij.openapi.roots.ModuleRootManager;
 import com.intellij.openapi.vfs.VirtualFile;
 import com.intellij.psi.PsiFile;
+import io.flutter.utils.OpenApiUtils;
 import org.jetbrains.annotations.NotNull;
 import org.jetbrains.annotations.Nullable;
 
-import java.util.ArrayList;
-import java.util.HashMap;
-import java.util.List;
-import java.util.Map;
+import java.util.*;
 
 /**
  * Cache the information computed from pubspecs in the project.
@@ -26,7 +21,7 @@ import java.util.Map;
 public class PubRootCache {
   @NotNull
   public static PubRootCache getInstance(@NotNull final Project project) {
-    return ServiceManager.getService(project, PubRootCache.class);
+    return Objects.requireNonNull(project.getService(PubRootCache.class));
   }
 
   @NotNull final Project project;
@@ -48,7 +43,7 @@ public class PubRootCache {
   }
 
   @Nullable
-  public PubRoot getRoot(VirtualFile file) {
+  public PubRoot getRoot(@Nullable VirtualFile file) {
     file = findPubspecDir(file);
     if (file == null) {
       return null;
@@ -65,10 +60,10 @@ public class PubRootCache {
   }
 
   @NotNull
-  public List<PubRoot> getRoots(Module module) {
+  public List<@NotNull PubRoot> getRoots(@NotNull Module module) {
     final List<PubRoot> result = new ArrayList<>();
 
-    for (VirtualFile dir : ModuleRootManager.getInstance(module).getContentRoots()) {
+    for (VirtualFile dir : OpenApiUtils.getContentRoots(module)) {
       PubRoot root = cache.get(dir);
 
       if (root == null) {
@@ -87,20 +82,20 @@ public class PubRootCache {
   @NotNull
   public List<PubRoot> getRoots(@NotNull Project project) {
     final List<PubRoot> result = new ArrayList<>();
-    for (Module module : ModuleManager.getInstance(project).getModules()) {
+    for (Module module : OpenApiUtils.getModules(project)) {
       result.addAll(getRoots(module));
     }
     return result;
   }
 
   @Nullable
-  private VirtualFile findPubspecDir(VirtualFile file) {
+  private VirtualFile findPubspecDir(@Nullable VirtualFile file) {
     if (file == null) {
       return null;
     }
 
     if (file.isDirectory()) {
-      final VirtualFile pubspec = file.findChild("pubspec.yaml");
+      final VirtualFile pubspec = file.findChild(PubRoot.PUBSPEC_YAML);
       if (pubspec != null && pubspec.exists() && !pubspec.isDirectory()) {
         return file;
       }

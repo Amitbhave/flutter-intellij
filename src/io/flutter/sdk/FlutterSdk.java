@@ -5,8 +5,14 @@
  */
 package io.flutter.sdk;
 
-import com.google.gson.*;
-import com.intellij.execution.process.*;
+import com.google.gson.JsonElement;
+import com.google.gson.JsonObject;
+import com.google.gson.JsonPrimitive;
+import com.google.gson.JsonSyntaxException;
+import com.intellij.execution.process.ColoredProcessHandler;
+import com.intellij.execution.process.ProcessEvent;
+import com.intellij.execution.process.ProcessListener;
+import com.intellij.execution.process.ProcessOutputTypes;
 import com.intellij.openapi.diagnostic.Logger;
 import com.intellij.openapi.fileEditor.FileDocumentManager;
 import com.intellij.openapi.module.Module;
@@ -17,47 +23,81 @@ import com.intellij.openapi.roots.libraries.LibraryTable;
 import com.intellij.openapi.roots.libraries.LibraryTablesRegistrar;
 import com.intellij.openapi.util.Key;
 import com.intellij.openapi.util.io.FileUtil;
+import com.intellij.openapi.util.text.StringUtil;
 import com.intellij.openapi.vfs.LocalFileSystem;
 import com.intellij.openapi.vfs.VfsUtil;
 import com.intellij.openapi.vfs.VirtualFile;
 import com.intellij.openapi.vfs.VirtualFileManager;
-import com.intellij.util.ui.EdtInvocationManager;
+import com.intellij.util.ui.EDT;
 import com.jetbrains.lang.dart.sdk.DartSdk;
+import io.flutter.FlutterBundle;
 import io.flutter.FlutterUtils;
 import io.flutter.dart.DartPlugin;
+import io.flutter.logging.PluginLogger;
+import io.flutter.module.FlutterProjectType;
 import io.flutter.pub.PubRoot;
 import io.flutter.run.FlutterDevice;
 import io.flutter.run.FlutterLaunchMode;
 import io.flutter.run.common.RunMode;
+import io.flutter.run.test.TestFields;
 import io.flutter.settings.FlutterSettings;
+import io.flutter.utils.JsonUtils;
+import io.flutter.utils.ProcessAdapter;
+import org.jetbrains.annotations.NonNls;
 import org.jetbrains.annotations.NotNull;
 import org.jetbrains.annotations.Nullable;
 
+import java.io.IOException;
+import java.nio.file.Files;
+import java.nio.file.Paths;
+import java.nio.file.attribute.FileTime;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
+import java.util.Set;
 
 import static java.util.Arrays.asList;
 
 public class FlutterSdk {
-  public static final String FLUTTER_SDK_GLOBAL_LIB_NAME = "Flutter SDK";
+  public static final @NotNull String DART_SDK_SUFFIX = "/bin/cache/dart-sdk";
+  public static final @NotNull String LINUX_DART_SUFFIX = "/google-dartlang";
+  public static final @NotNull String LOCAL_DART_SUFFIX = "/google-dartlang-local";
+  public static final @NotNull String MAC_DART_SUFFIX = "/dart_lang/macos_sdk";
 
-  public static final String DART_SDK_SUFFIX = "/bin/cache/dart-sdk";
+  private static final @NotNull String DART_CORE_SUFFIX = DART_SDK_SUFFIX + "/lib/core";
 
-  private static final String DART_CORE_SUFFIX = DART_SDK_SUFFIX + "/lib/core";
+  private static final @NotNull Logger LOG = PluginLogger.createLogger(FlutterSdk.class);
 
-  private static final Logger LOG = Logger.getInstance(FlutterSdk.class);
-
-  private static final Map<String, FlutterSdk> projectSdkCache = new HashMap<>();
+  private static final @NotNull Map<String, FlutterSdk> projectSdkCache = new HashMap<>();
 
   private final @NotNull VirtualFile myHome;
   private final @NotNull FlutterSdkVersion myVersion;
-  private final Map<String, String> cachedConfigValues = new HashMap<>();
+  private final @NotNull Map<String, String> cachedConfigValues = new HashMap<>();
 
   private FlutterSdk(@NotNull final VirtualFile home, @NotNull final FlutterSdkVersion version) {
     myHome = home;
     myVersion = version;
+  }
+
+  public boolean isOlderThanToolsStamp(@NotNull VirtualFile gen) {
+    final VirtualFile bin = myHome.findChild("bin");
+    if (bin == null) return false;
+    final VirtualFile cache = bin.findChild("cache");
+    if (cache == null) return false;
+    final VirtualFile stamp = cache.findChild("flutter_tools.stamp");
+    if (stamp == null) return false;
+    try {
+      final FileTime genFile = Files.getLastModifiedTime(Paths.get(gen.getPath()));
+      final FileTime stampFile = Files.getLastModifiedTime(Paths.get(stamp.getPath()));
+      return genFile.compareTo(stampFile) > 0;
+    }
+    catch (IOException ignored) {
+      return false;
+    }
   }
 
   /**
@@ -70,28 +110,23 @@ public class FlutterSdk {
     if (project.isDisposed()) {
       return null;
     }
+
     final DartSdk dartSdk = DartPlugin.getDartSdk(project);
     if (dartSdk == null) {
       return null;
     }
 
-    final String dartPath = dartSdk.getHomePath();
+    final String homePath = dartSdk.getHomePath();
+    if (homePath == null) {
+      return null;
+    }
+    final String dartPath = FileUtil.toSystemIndependentName(homePath);
     if (!dartPath.endsWith(DART_SDK_SUFFIX)) {
       return null;
     }
 
     final String sdkPath = dartPath.substring(0, dartPath.length() - DART_SDK_SUFFIX.length());
-
-    // Cache based on the project and path ('e41cfa3d:/Users/devoncarew/projects/flutter/flutter').
-    final String cacheKey = project.getLocationHash() + ":" + sdkPath;
-
-    synchronized (projectSdkCache) {
-      if (!projectSdkCache.containsKey(cacheKey)) {
-        projectSdkCache.put(cacheKey, FlutterSdk.forPath(sdkPath));
-      }
-
-      return projectSdkCache.get(cacheKey);
-    }
+    return FlutterSdk.forPath(sdkPath);
   }
 
   /**
@@ -118,15 +153,28 @@ public class FlutterSdk {
       return null;
     }
     else {
-      return new FlutterSdk(home, FlutterSdkVersion.readFromSdk(home));
+      return saveSdkInCache(home);
     }
+  }
+
+  @NotNull
+  private static FlutterSdk saveSdkInCache(@NotNull VirtualFile home) {
+    final String cacheKey = home.getCanonicalPath();
+    synchronized (projectSdkCache) {
+      if (!projectSdkCache.containsKey(cacheKey)) {
+        projectSdkCache.put(cacheKey, new FlutterSdk(home, FlutterSdkVersion.readFromSdk(home)));
+      }
+    }
+    return Objects.requireNonNull(projectSdkCache.get(cacheKey));
   }
 
   @Nullable
   private static Library getDartSdkLibrary(@NotNull Project project) {
-    final LibraryTable libraryTable = LibraryTablesRegistrar.getInstance().getLibraryTable(project);
+    LibraryTablesRegistrar registrar = LibraryTablesRegistrar.getInstance();
+    if (registrar == null) return null;
+    final LibraryTable libraryTable = registrar.getLibraryTable(project);
     for (Library lib : libraryTable.getLibraries()) {
-      if ("Dart SDK".equals(lib.getName())) {
+      if (lib != null && "Dart SDK".equals(lib.getName())) {
         return lib;
       }
     }
@@ -134,18 +182,20 @@ public class FlutterSdk {
   }
 
   @Nullable
-  private static FlutterSdk getFlutterFromDartSdkLibrary(Library lib) {
+  private static FlutterSdk getFlutterFromDartSdkLibrary(@NotNull Library lib) {
+    assert OrderRootType.CLASSES != null;
     final String[] urls = lib.getUrls(OrderRootType.CLASSES);
     for (String url : urls) {
-      if (url.endsWith(DART_CORE_SUFFIX)) {
+      if (url != null && url.endsWith(DART_CORE_SUFFIX)) {
         final String flutterUrl = url.substring(0, url.length() - DART_CORE_SUFFIX.length());
         final VirtualFile home = VirtualFileManager.getInstance().findFileByUrl(flutterUrl);
-        return home == null ? null : new FlutterSdk(home, FlutterSdkVersion.readFromSdk(home));
+        return home == null ? null : saveSdkInCache(home);
       }
     }
     return null;
   }
 
+  @NotNull
   public FlutterCommand flutterVersion() {
     // TODO(devoncarew): Switch to calling 'flutter --version --machine'. The ouput will look like:
     // Building flutter tool...
@@ -162,22 +212,40 @@ public class FlutterSdk {
     return new FlutterCommand(this, getHome(), FlutterCommand.Type.VERSION);
   }
 
+  @NotNull
   public FlutterCommand flutterUpgrade() {
     return new FlutterCommand(this, getHome(), FlutterCommand.Type.UPGRADE);
   }
 
+  @NotNull
   public FlutterCommand flutterClean(@NotNull PubRoot root) {
     return new FlutterCommand(this, root.getRoot(), FlutterCommand.Type.CLEAN);
   }
 
+  @NotNull
   public FlutterCommand flutterDoctor() {
     return new FlutterCommand(this, getHome(), FlutterCommand.Type.DOCTOR);
   }
 
+  @NonNls
+  @NotNull
   public FlutterCommand flutterCreate(@NotNull VirtualFile appDir, @Nullable FlutterCreateAdditionalSettings additionalSettings) {
     final List<String> args = new ArrayList<>();
     if (additionalSettings != null) {
       args.addAll(additionalSettings.getArgs());
+      if (FlutterProjectType.PLUGIN.equals(additionalSettings.getType())) {
+        // TODO(messick): Remove this after the wizard UI is updated.
+        if (!args.contains("--platforms")) {
+          args.add("--platforms");
+          args.add("android,ios");
+        }
+      }
+      // The --project-name arg was actually introduced before --platforms but everyone should be on 2.0 by now anyway.
+      final String projectName = additionalSettings.getProjectName();
+      if (projectName != null) {
+        args.add("--project-name");
+        args.add(projectName);
+      }
     }
 
     // keep as the last argument
@@ -188,61 +256,69 @@ public class FlutterSdk {
     return new FlutterCommand(this, appDir.getParent(), FlutterCommand.Type.CREATE, vargs);
   }
 
+  @NotNull
+  public FlutterCommand flutterPackagesAdd(@NotNull PubRoot root, @NotNull String name, boolean devOnly) {
+    if (devOnly) name = "dev:" + name;
+    return new FlutterCommand(this, root.getRoot(), FlutterCommand.Type.PUB_ADD, name);
+  }
+
+  @NotNull
   public FlutterCommand flutterPackagesGet(@NotNull PubRoot root) {
     return new FlutterCommand(this, root.getRoot(), FlutterCommand.Type.PUB_GET);
   }
 
+  @NotNull
   public FlutterCommand flutterPackagesUpgrade(@NotNull PubRoot root) {
     return new FlutterCommand(this, root.getRoot(), FlutterCommand.Type.PUB_UPGRADE);
   }
 
+  @NotNull
   public FlutterCommand flutterPackagesOutdated(@NotNull PubRoot root) {
     return new FlutterCommand(this, root.getRoot(), FlutterCommand.Type.PUB_OUTDATED);
   }
 
+  @NotNull
   public FlutterCommand flutterPub(@Nullable PubRoot root, String... args) {
     return new FlutterCommand(this, root == null ? null : root.getRoot(), FlutterCommand.Type.PUB, args);
   }
 
-  public FlutterCommand flutterMakeHostAppEditable(@NotNull PubRoot root) {
-    return new FlutterCommand(this, root.getRoot(), FlutterCommand.Type.MAKE_HOST_APP_EDITABLE);
-  }
-
+  @NotNull
   public FlutterCommand flutterBuild(@NotNull PubRoot root, String... additionalArgs) {
     return new FlutterCommand(this, root.getRoot(), FlutterCommand.Type.BUILD, additionalArgs);
   }
 
+  @NotNull
   public FlutterCommand flutterConfig(String... additionalArgs) {
     return new FlutterCommand(this, getHome(), FlutterCommand.Type.CONFIG, additionalArgs);
   }
 
+  @NotNull
   public FlutterCommand flutterRun(@NotNull PubRoot root,
                                    @NotNull VirtualFile main,
-                                   @Nullable FlutterDevice device,
+                                   @NotNull FlutterDevice device,
                                    @NotNull RunMode mode,
                                    @NotNull FlutterLaunchMode flutterLaunchMode,
                                    @NotNull Project project,
                                    String... additionalArgs) {
     final List<String> args = new ArrayList<>();
     args.add("--machine");
-    if (FlutterSettings.getInstance().isVerboseLogging()) {
+    FlutterSettings settings = FlutterSettings.getInstance();
+    if (settings.isVerboseLogging()) {
       args.add("--verbose");
     }
 
     if (flutterLaunchMode == FlutterLaunchMode.DEBUG) {
-      if (FlutterSettings.getInstance().isTrackWidgetCreationEnabled(project)) {
+      // Ensure additionalArgs doesn't have any arg like 'track-widget-creation'.
+      if (Arrays.stream(additionalArgs).noneMatch(s -> s.contains("track-widget-creation"))) {
         args.add("--track-widget-creation");
       }
-      else {
-        args.add("--no-track-widget-creation");
-      }
     }
 
-    if (device != null) {
-      args.add("--device-id=" + device.deviceId());
-    }
+    args.add("--device-id=" + device.deviceId());
 
-    if (mode == RunMode.DEBUG) {
+    // TODO (helin24): Remove special handling for web-server if we can fix https://github.com/flutter/flutter-intellij/issues/4767.
+    // Currently we can't connect to the VM service for the web-server 'device' to resume.
+    if (mode == RunMode.DEBUG || (mode == RunMode.RUN && !device.deviceId().equals("web-server"))) {
       args.add("--start-paused");
     }
 
@@ -265,6 +341,7 @@ public class FlutterSdk {
     return new FlutterCommand(this, root.getRoot(), FlutterCommand.Type.RUN, args.toArray(new String[]{ }));
   }
 
+  @NotNull
   public FlutterCommand flutterAttach(@NotNull PubRoot root, @NotNull VirtualFile main, @Nullable FlutterDevice device,
                                       @NotNull FlutterLaunchMode flutterLaunchMode, String... additionalArgs) {
     final List<String> args = new ArrayList<>();
@@ -298,37 +375,40 @@ public class FlutterSdk {
     return new FlutterCommand(this, root.getRoot(), FlutterCommand.Type.ATTACH, args.toArray(new String[]{ }));
   }
 
-  public FlutterCommand flutterRunOnTester(@NotNull PubRoot root, @NotNull String mainPath) {
+  @NotNull
+  public FlutterCommand flutterTest(@NotNull PubRoot root, @NotNull VirtualFile fileOrDir, @Nullable String testNameSubstring,
+                                    @NotNull RunMode mode, @Nullable String additionalArgs, TestFields.Scope scope, boolean useRegexp) {
+
     final List<String> args = new ArrayList<>();
     args.add("--machine");
-    args.add("--device-id=flutter-tester");
-    args.add(mainPath);
-    return new FlutterCommand(this, root.getRoot(), FlutterCommand.Type.RUN, args.toArray(new String[]{ }));
-  }
 
-  public FlutterCommand flutterTest(@NotNull PubRoot root, @NotNull VirtualFile fileOrDir, @Nullable String testNameSubstring,
-                                    @NotNull RunMode mode) {
-
-    final List<String> args = new ArrayList<>();
-    if (myVersion.flutterTestSupportsMachineMode()) {
-      args.add("--machine");
-      // Otherwise, just run it normally and show the output in a non-test console.
-    }
-    if (mode == RunMode.DEBUG) {
-      if (!myVersion.flutterTestSupportsMachineMode()) {
-        throw new IllegalStateException("Flutter SDK is too old to debug tests");
-      }
+    // Starting the app paused so the IDE can catch early errors is ideal. However, we don't have a way to resume for multiple test files
+    // yet, so we want to exclude directory scope tests from starting paused. See https://github.com/flutter/flutter-intellij/issues/4737.
+    if (mode == RunMode.DEBUG || (mode == RunMode.RUN && !Objects.equals(scope, TestFields.Scope.DIRECTORY))) {
       args.add("--start-paused");
     }
     if (FlutterSettings.getInstance().isVerboseLogging()) {
       args.add("--verbose");
     }
     if (testNameSubstring != null) {
-      if (!myVersion.flutterTestSupportsFiltering()) {
-        throw new IllegalStateException("Flutter SDK is too old to select tests by name");
+      if (useRegexp) {
+        args.add("--name");
+        args.add(StringUtil.escapeToRegexp(testNameSubstring) + "(\\s*\\(variant: .*\\))?$");
       }
-      args.add("--plain-name");
-      args.add(testNameSubstring);
+      else {
+        args.add("--plain-name");
+        args.add(testNameSubstring);
+      }
+    }
+
+    if (additionalArgs != null && !additionalArgs.trim().isEmpty()) {
+      args.addAll(Arrays.asList(additionalArgs.trim().split(" ")));
+    }
+
+    if (mode == RunMode.COVERAGE) {
+      if (!args.contains("--coverage")) {
+        args.add("--coverage");
+      }
     }
 
     if (!root.getRoot().equals(fileOrDir)) {
@@ -341,6 +421,25 @@ public class FlutterSdk {
     }
 
     return new FlutterCommand(this, root.getRoot(), FlutterCommand.Type.TEST, args.toArray(new String[]{ }));
+  }
+
+  @NotNull
+  public FlutterCommand widgetPreview(@NotNull PubRoot root, boolean isVerboseMode, @Nullable String dtdUri, @Nullable String devToolsUri) {
+    final List<String> args = new ArrayList<>();
+    args.add("start");
+    args.add("--web-server");
+    args.add("--machine");
+    if (isVerboseMode) {
+      args.add("--verbose");
+    }
+    if (dtdUri != null) {
+      args.add("--dtd-url=" + dtdUri);
+    }
+    if (devToolsUri != null) {
+      args.add("--devtools-server-address=" + devToolsUri);
+    }
+
+    return new FlutterCommand(this, root.getRoot(), FlutterCommand.Type.WIDGET_PREVIEW, args.toArray(new String[]{ }));
   }
 
   /**
@@ -372,11 +471,11 @@ public class FlutterSdk {
       }
     }
     catch (InterruptedException e) {
-      FlutterUtils.warn(LOG, e);
+      FlutterUtils.warn(LOG, "Interruption while waiting for createFiles", e, true);
       return null;
     }
 
-    if (EdtInvocationManager.getInstance().isEventDispatchThread()) {
+    if (EDT.isCurrentThreadEdt()) {
       VfsUtil.markDirtyAndRefresh(false, true, true, baseDir); // Need this for AS.
     }
     else {
@@ -385,11 +484,21 @@ public class FlutterSdk {
     return PubRoot.forDirectory(baseDir);
   }
 
-  public Process startMakeHostAppEditable(@NotNull PubRoot root, @NotNull Project project) {
+  /**
+   * Starts running 'flutter pub add' on the given pub root provided it's in one of this project's modules.
+   * <p>
+   * Shows output in the console associated with the given module.
+   * <p>
+   * Returns the process if successfully started.
+   */
+  @Nullable
+  public Process startPubAdd(@NotNull PubRoot root, @NotNull Project project, @NotNull String pkg, boolean devOnly) {
     final Module module = root.getModule(project);
     if (module == null) return null;
-    // Refresh afterwards to ensure new directory is recognized.
-    return flutterMakeHostAppEditable(root).startInModuleConsole(module, root::refresh, null);
+    // Ensure pubspec is saved.
+    FileDocumentManager.getInstance().saveAllDocuments();
+    // Refresh afterwards to ensure Dart Plugin doesn't mistakenly nag to run pub.
+    return flutterPackagesAdd(root, pkg, devOnly).startInModuleConsole(module, root::refresh, null);
   }
 
   /**
@@ -399,12 +508,13 @@ public class FlutterSdk {
    * <p>
    * Returns the process if successfully started.
    */
+  @Nullable
   public Process startPubGet(@NotNull PubRoot root, @NotNull Project project) {
     final Module module = root.getModule(project);
     if (module == null) return null;
     // Ensure pubspec is saved.
     FileDocumentManager.getInstance().saveAllDocuments();
-    // Refresh afterwards to ensure Dart Plugin sees .packages and doesn't mistakenly nag to run pub.
+    // Refresh afterwards to ensure Dart Plugin doesn't mistakenly nag to run pub.
     return flutterPackagesGet(root).startInModuleConsole(module, root::refresh, null);
   }
 
@@ -415,6 +525,7 @@ public class FlutterSdk {
    * <p>
    * Returns the process if successfully started.
    */
+  @Nullable
   public Process startPubUpgrade(@NotNull PubRoot root, @NotNull Project project) {
     final Module module = root.getModule(project);
     if (module == null) return null;
@@ -430,6 +541,7 @@ public class FlutterSdk {
    * <p>
    * Returns the process if successfully started.
    */
+  @Nullable
   public Process startPubOutdated(@NotNull PubRoot root, @NotNull Project project) {
     final Module module = root.getModule(project);
     if (module == null) return null;
@@ -465,6 +577,67 @@ public class FlutterSdk {
     return FlutterSdkUtil.pathToDartSdk(getHomePath());
   }
 
+  @NotNull
+  @NonNls
+  private static final String @NotNull [] PLATFORMS =
+    new String[]{"enable-android", "enable-ios", "enable-web", "enable-linux-desktop", "enable-macos-desktop", "enable-windows-desktop"};
+
+  @NotNull
+  @NonNls
+  public Set<String> queryConfiguredPlatforms(boolean useCachedValue) {
+    final Set<String> platforms = new HashSet<>();
+    // Someone could do: flutter config --no-enable-ios --no-enable-android
+    platforms.add("enable-android");
+    platforms.add("enable-ios");
+    if (useCachedValue) {
+      for (String key : PLATFORMS) {
+        final String value = cachedConfigValues.get(key);
+        if ("true".equals(value)) {
+          platforms.add(key);
+        }
+        else if ("false".equals(value)) {
+          platforms.remove(key);
+        }
+      }
+      return platforms;
+    }
+
+    final String stdout = returnOutputOfQuery(flutterConfig("--machine"));
+    if (stdout == null) {
+      return platforms;
+    }
+    final int startJsonIndex = stdout.indexOf('{');
+    if (startJsonIndex == -1) {
+      return platforms;
+    }
+    try {
+      final JsonElement elem = JsonUtils.parseString(stdout.substring(startJsonIndex));
+      if (elem == null || elem.isJsonNull()) {
+        FlutterUtils.warn(LOG, FlutterBundle.message("flutter.sdk.invalid.json.error"));
+        return platforms;
+      }
+
+      final JsonObject obj = elem.getAsJsonObject();
+      if (obj == null) return platforms;
+
+      for (String key : PLATFORMS) {
+        final JsonPrimitive primitive = obj.getAsJsonPrimitive(key);
+        if (primitive != null) {
+          if ("true".equals(primitive.getAsString())) {
+            platforms.add(key);
+          }
+          else if ("false".equals(primitive.getAsString())) {
+            platforms.remove(key);
+          }
+          cachedConfigValues.put(key, primitive.getAsString());
+        }
+      }
+    }
+    catch (JsonSyntaxException ignored) {
+    }
+    return platforms;
+  }
+
   /**
    * Query 'flutter config' for the given key, and optionally use any existing cached value.
    */
@@ -474,73 +647,67 @@ public class FlutterSdk {
       return cachedConfigValues.get(key);
     }
 
-    cachedConfigValues.put(key, queryFlutterConfigImpl(key));
-    return cachedConfigValues.get(key);
+    final String stdout = returnOutputOfQuery(flutterConfig("--machine"));
+    if (stdout != null) {
+      try {
+        final JsonElement elem = JsonUtils.parseString(stdout.substring(stdout.indexOf('{')));
+        if (elem == null || elem.isJsonNull()) {
+          FlutterUtils.warn(LOG, FlutterBundle.message("flutter.sdk.invalid.json.error"));
+          return null;
+        }
+
+        final JsonObject obj = elem.getAsJsonObject();
+        if (obj == null) return null;
+
+        for (String jsonKey : JsonUtils.getKeySet(obj)) {
+          final JsonElement element = obj.get(jsonKey);
+          if (element == null || element.isJsonNull()) {
+            continue;
+          }
+          final JsonPrimitive primitive = (JsonPrimitive)element;
+          cachedConfigValues.put(jsonKey, primitive.getAsString());
+        }
+      }
+      catch (JsonSyntaxException ignored) {
+      }
+    }
+    return null;
   }
 
-  private String queryFlutterConfigImpl(String key) {
-    final FlutterCommand command = flutterConfig("--machine");
-    final OSProcessHandler process = command.startProcess(false);
-
+  // Do not run this on EDT.
+  @Nullable
+  private String returnOutputOfQuery(@NotNull FlutterCommand command) {
+    final ColoredProcessHandler process = command.startProcess(false);
     if (process == null) {
       return null;
     }
 
     final StringBuilder stdout = new StringBuilder();
     process.addProcessListener(new ProcessAdapter() {
-      boolean hasSeenStartingBrace = false;
-
       @Override
       public void onTextAvailable(@NotNull ProcessEvent event, @NotNull Key outputType) {
-        // {"android-studio-dir":"/Applications/Android Studio 3.0 Preview.app/Contents"}
         if (outputType == ProcessOutputTypes.STDOUT) {
-          // Ignore any non-json starting lines (like "Building flutter tool...").
-          if (event.getText().startsWith("{")) {
-            hasSeenStartingBrace = true;
-          }
-          if (hasSeenStartingBrace) {
-            stdout.append(event.getText());
-          }
+          stdout.append(event.getText());
         }
       }
     });
 
-    LOG.info("Calling config --machine");
     final long start = System.currentTimeMillis();
-
     process.startNotify();
-
     if (process.waitFor(5000)) {
       final long duration = System.currentTimeMillis() - start;
-      LOG.info("flutter config --machine: " + duration + "ms");
-
+      LOG.info(command.getSanitizedDisplayCommand() + " (" + duration + "ms)");
       final Integer code = process.getExitCode();
       if (code != null && code == 0) {
-        try {
-          final JsonParser jp = new JsonParser();
-          final JsonElement elem = jp.parse(stdout.toString());
-          if (elem.isJsonNull()) {
-            FlutterUtils.warn(LOG, "Invalid Json from flutter config");
-            return null;
-          }
-
-          final JsonObject obj = elem.getAsJsonObject();
-          final JsonPrimitive primitive = obj.getAsJsonPrimitive(key);
-          if (primitive != null) {
-            return primitive.getAsString();
-          }
-        }
-        catch (JsonSyntaxException ignored) {
-        }
+        return stdout.toString();
       }
       else {
-        LOG.info("Exit code from flutter config --machine: " + code);
+        LOG.info("Exit code " + code + " from " + command.getSanitizedDisplayCommand());
       }
     }
     else {
-      LOG.info("Timeout when calling flutter config --machine");
+      LOG.info("Timeout when calling " + command.getSanitizedDisplayCommand());
     }
-
     return null;
   }
 }

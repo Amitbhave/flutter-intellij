@@ -1,6 +1,10 @@
 package io.flutter.test;
 
-import com.google.gson.*;
+import com.google.gson.Gson;
+import com.google.gson.JsonArray;
+import com.google.gson.JsonElement;
+import com.google.gson.JsonObject;
+import com.google.gson.JsonSyntaxException;
 import com.intellij.execution.testframework.TestConsoleProperties;
 import com.intellij.execution.testframework.sm.ServiceMessageBuilder;
 import com.intellij.execution.testframework.sm.runner.OutputToGeneralTestEventsConverter;
@@ -11,7 +15,8 @@ import com.intellij.openapi.vfs.VirtualFile;
 import com.intellij.util.PathUtil;
 import com.jetbrains.lang.dart.ide.runner.util.DartTestLocationProvider;
 import com.jetbrains.lang.dart.util.DartUrlResolver;
-import gnu.trove.TIntLongHashMap;
+import io.flutter.logging.PluginLogger;
+import io.flutter.utils.JsonUtils;
 import jetbrains.buildServer.messages.serviceMessages.ServiceMessageVisitor;
 import org.jetbrains.annotations.NotNull;
 import org.jetbrains.annotations.Nullable;
@@ -22,6 +27,7 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -32,9 +38,9 @@ import java.util.regex.Pattern;
  * event followed some time later by an 'error' event for that same test. That should
  * convert a successful test into a failure. That case is not being handled.
  */
-@SuppressWarnings({"Duplicates", "FieldMayBeFinal", "LocalCanBeFinal", "SameReturnValue"})
+@SuppressWarnings({"FieldMayBeFinal", "LocalCanBeFinal", "SameReturnValue"})
 public class DartTestEventsConverterZ extends OutputToGeneralTestEventsConverter {
-  private static final Logger LOG = Logger.getInstance(DartTestEventsConverterZ.class);
+  private static final @NotNull Logger LOG = PluginLogger.createLogger(DartTestEventsConverterZ.class);
 
   private static final String TYPE_START = "start";
   private static final String TYPE_SUITE = "suite";
@@ -65,19 +71,21 @@ public class DartTestEventsConverterZ extends OutputToGeneralTestEventsConverter
   private static final String JSON_MESSAGE = "message";
   private static final String JSON_ERROR_MESSAGE = "error";
   private static final String JSON_STACK_TRACE = "stackTrace";
-  private static final String JSON_IS_FAILURE = "isFailure";
   private static final String JSON_PATH = "path";
   private static final String JSON_PLATFORM = "platform";
   private static final String JSON_LINE = "line";
   private static final String JSON_COLUMN = "column";
   private static final String JSON_URL = "url";
+  private static final String JSON_ROOT_LINE = "root_line";
+  private static final String JSON_ROOT_COLUMN = "root_column";
+  private static final String JSON_ROOT_URL = "root_url";
 
   private static final String RESULT_SUCCESS = "success";
   private static final String RESULT_FAILURE = "failure";
   private static final String RESULT_ERROR = "error";
 
   private static final String EXPECTED = "Expected: ";
-  private static final Pattern EXPECTED_ACTUAL_RESULT = Pattern.compile("\\nExpected: (.*)\\n {2}Actual: (.*)\\n *\\^\\n Differ.*\\n");
+  private static final Pattern EXPECTED_ACTUAL_RESULT = Pattern.compile("\\nExpected: (.*)\\n  Actual: (.*)\\n *\\^\\n Differ.*\\n");
   private static final String FILE_URL_PREFIX = "dart_location://";
   private static final String LOADING_PREFIX = "loading ";
   private static final String COMPILING_PREFIX = "compiling ";
@@ -91,10 +99,10 @@ public class DartTestEventsConverterZ extends OutputToGeneralTestEventsConverter
   private String myLocation;
   private Key myCurrentOutputType;
   private ServiceMessageVisitor myCurrentVisitor;
-  private TIntLongHashMap myTestIdToTimestamp;
-  private Map<Integer, Test> myTestData;
-  private Map<Integer, Group> myGroupData;
-  private Map<Integer, Suite> mySuiteData;
+  private final HashMap<Integer, Long> myTestIdToTimestamp;
+  private final Map<Integer, Test> myTestData;
+  private final Map<Integer, Group> myGroupData;
+  private final Map<Integer, Suite> mySuiteData;
   private int mySuitCount;
 
   public DartTestEventsConverterZ(@NotNull final String testFrameworkName,
@@ -102,13 +110,14 @@ public class DartTestEventsConverterZ extends OutputToGeneralTestEventsConverter
                                   @NotNull final DartUrlResolver urlResolver) {
     super(testFrameworkName, consoleProperties);
     myUrlResolver = urlResolver;
-    myTestIdToTimestamp = new TIntLongHashMap();
+    myTestIdToTimestamp = new HashMap<>();
     myTestData = new HashMap<>();
     myGroupData = new HashMap<>();
     mySuiteData = new HashMap<>();
   }
 
-  protected boolean processServiceMessages(final String text, final Key outputType, final ServiceMessageVisitor visitor)
+  @Override
+  protected boolean processServiceMessages(final String text, final @NotNull Key outputType, final @NotNull ServiceMessageVisitor visitor)
     throws ParseException {
     LOG.debug("<<< " + text.trim());
     myCurrentOutputType = outputType;
@@ -119,10 +128,9 @@ public class DartTestEventsConverterZ extends OutputToGeneralTestEventsConverter
 
   @SuppressWarnings("SimplifiableIfStatement")
   private boolean processEventText(final String text) throws JsonSyntaxException, ParseException {
-    JsonParser jp = new JsonParser();
     JsonElement elem;
     try {
-      elem = jp.parse(text);
+      elem = JsonUtils.parseString(text);
     }
     catch (JsonSyntaxException ex) {
       if (text.contains("\"json\" is not an allowed value for option \"reporter\"")) {
@@ -154,7 +162,6 @@ public class DartTestEventsConverterZ extends OutputToGeneralTestEventsConverter
     return super.processServiceMessages(text, myCurrentOutputType, myCurrentVisitor);
   }
 
-  @SuppressWarnings("SimplifiableIfStatement")
   private boolean process(JsonObject obj) throws JsonSyntaxException, ParseException {
     String type = obj.get(JSON_TYPE).getAsString();
     if (TYPE_TEST_START.equals(type)) {
@@ -208,7 +215,7 @@ public class DartTestEventsConverterZ extends OutputToGeneralTestEventsConverter
         path = test.getName().substring(COMPILING_PREFIX.length());
       }
 
-      if (path.length() > 0) myLocation = FILE_URL_PREFIX + path;
+      if (!path.isEmpty()) myLocation = FILE_URL_PREFIX + path;
 
       test.myTestStartReported = false;
       return true;
@@ -245,9 +252,9 @@ public class DartTestEventsConverterZ extends OutputToGeneralTestEventsConverter
     final Group group = test.getParent();
     return group == null && (test.getName().startsWith(LOADING_PREFIX) || test.getName().startsWith(COMPILING_PREFIX))
            ||
-           group != null && group.getDoneTestsCount() == 0 && test.getBaseName().equals(SET_UP_ALL_VIRTUAL_TEST_NAME)
+           group != null && group.getDoneTestsCount() == 0 && Objects.equals(test.getBaseName(), SET_UP_ALL_VIRTUAL_TEST_NAME)
            ||
-           group != null && group.getDoneTestsCount() > 0 && test.getBaseName().equals(TEAR_DOWN_ALL_VIRTUAL_TEST_NAME);
+           group != null && group.getDoneTestsCount() > 0 && Objects.equals(test.getBaseName(), TEAR_DOWN_ALL_VIRTUAL_TEST_NAME);
   }
 
   private boolean handleTestDone(JsonObject obj) throws ParseException {
@@ -348,7 +355,6 @@ public class DartTestEventsConverterZ extends OutputToGeneralTestEventsConverter
         }
       }
 
-      if (!getBoolean(obj, JSON_IS_FAILURE)) testError.addAttribute("error", "true");
       testError.addAttribute("message", appendLineBreakIfNeeded(failureMessage));
 
       result &= finishMessage(testError, test.getId(), test.getValidParentId());
@@ -381,7 +387,8 @@ public class DartTestEventsConverterZ extends OutputToGeneralTestEventsConverter
     boolean result = true;
 
     if (!test.myTestStartReported) {
-      if (test.getBaseName().equals(SET_UP_ALL_VIRTUAL_TEST_NAME) || test.getBaseName().equals(TEAR_DOWN_ALL_VIRTUAL_TEST_NAME)) {
+      if (Objects.equals(test.getBaseName(), SET_UP_ALL_VIRTUAL_TEST_NAME) ||
+          Objects.equals(test.getBaseName(), TEAR_DOWN_ALL_VIRTUAL_TEST_NAME)) {
         return true; // output in successfully passing setUpAll/tearDownAll is not important enough to make these nodes visible
       }
 
@@ -403,7 +410,7 @@ public class DartTestEventsConverterZ extends OutputToGeneralTestEventsConverter
     mySuiteData.clear();
     mySuitCount = 0;
 
-    return doProcessServiceMessages(new ServiceMessageBuilder("enteredTheMatrix").toString());
+    return doProcessServiceMessages(ServiceMessageBuilder.testsStarted().toString());
   }
 
   @SuppressWarnings("RedundantThrows")
@@ -453,7 +460,8 @@ public class DartTestEventsConverterZ extends OutputToGeneralTestEventsConverter
     String location = "unknown";
     String loc;
 
-    final VirtualFile file = item.getUrl() == null ? null : myUrlResolver.findFileByDartUrl(item.getUrl());
+    final boolean badUrl = item.getUrl() == null || item.getUrl().endsWith(".dart.js");
+    final VirtualFile file = badUrl ? null : myUrlResolver.findFileByDartUrl(item.getUrl());
     if (file != null) {
       loc = FILE_URL_PREFIX + file.getPath();
     }
@@ -465,8 +473,14 @@ public class DartTestEventsConverterZ extends OutputToGeneralTestEventsConverter
     }
 
     if (loc != null) {
+      if (badUrl) {
+        loc += ",-1,-1";
+      }
+      else {
+        loc += "," + item.getLine() + "," + item.getColumn();
+      }
       String nameList = GSON.toJson(item.nameList(), DartTestLocationProvider.STRING_LIST_TYPE);
-      location = loc + "," + item.getLine() + "," + item.getColumn() + "," + nameList;
+      location = loc + "," + nameList;
     }
 
     messageBuilder.addAttribute("locationHint", location);
@@ -729,13 +743,6 @@ public class DartTestEventsConverterZ extends OutputToGeneralTestEventsConverter
   }
 
   protected static class Test extends Item {
-
-    private static class LocationInfo {
-      String url;
-      int line;
-      int column;
-    }
-
     private boolean myTestStartReported = false;
     private boolean myTestErrorReported = false;
 
@@ -746,26 +753,14 @@ public class DartTestEventsConverterZ extends OutputToGeneralTestEventsConverter
         parent = groups.get(groupIds[groupIds.length - 1]);
       }
       Suite suite = lookupSuite(obj, suites);
-
-      final LocationInfo loc = extractLocation(obj);
+      int line = extractInt(obj, JSON_ROOT_LINE);
+      if (line < 0) line = extractInt(obj, JSON_LINE);
+      int column = extractInt(obj, JSON_ROOT_COLUMN);
+      if (column < 0) column = extractInt(obj, JSON_COLUMN);
+      String url = extractString(obj, JSON_ROOT_URL, null);
+      if (url == null) url = extractString(obj, JSON_URL, null);
       return new Test(extractInt(obj, JSON_ID), extractString(obj, JSON_NAME, NO_NAME), parent, suite, extractMetadata(obj),
-                      loc.line < 0 ? -1 : loc.line - 1, loc.column < 0 ? -1 : loc.column - 1, loc.url);
-    }
-
-    private static LocationInfo extractLocation(JsonObject obj) {
-      final LocationInfo info = new LocationInfo();
-      // Check for root_* data first as it's more precise (when present).
-      info.url = extractString(obj, "root_url", null);
-      if (info.url != null) {
-        info.line = extractInt(obj, "root_line");
-        info.column = extractInt(obj, "root_column");
-      }
-      else {
-        info.url = extractString(obj, JSON_URL, null);
-        info.line = extractInt(obj, JSON_LINE);
-        info.column = extractInt(obj, JSON_COLUMN);
-      }
-      return info;
+                      line < 0 ? -1 : line - 1, column < 0 ? -1 : column - 1, url);
     }
 
     Test(int id, String name, Group parent, Suite suite, Metadata metadata, int line, int column, String url) {
@@ -793,7 +788,11 @@ public class DartTestEventsConverterZ extends OutputToGeneralTestEventsConverter
       Suite suite = lookupSuite(obj, suites);
       final int line = extractInt(obj, JSON_LINE);
       final int column = extractInt(obj, JSON_COLUMN);
-      return new Group(extractInt(obj, JSON_ID), extractString(obj, JSON_NAME, NO_NAME), parent, suite, extractMetadata(obj),
+      String groupName = extractString(obj, JSON_NAME, "");
+      if (groupName.isEmpty()) {
+        groupName = NO_NAME;
+      }
+      return new Group(extractInt(obj, JSON_ID), groupName, parent, suite, extractMetadata(obj),
                        extractInt(obj, JSON_TEST_COUNT), line < 0 ? -1 : line - 1, column < 0 ? -1 : column - 1,
                        extractString(obj, JSON_URL, null));
     }

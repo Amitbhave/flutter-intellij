@@ -21,7 +21,6 @@ import com.intellij.xdebugger.evaluation.XDebuggerEvaluator;
 import com.intellij.xdebugger.frame.XValue;
 import com.jetbrains.lang.dart.psi.*;
 import com.jetbrains.lang.dart.util.DartResolveUtil;
-import gnu.trove.THashSet;
 import io.flutter.vmService.DartVmServiceDebugProcess;
 import io.flutter.vmService.VmServiceWrapper;
 import org.dartlang.vm.service.consumer.GetObjectConsumer;
@@ -29,9 +28,7 @@ import org.dartlang.vm.service.element.*;
 import org.jetbrains.annotations.NotNull;
 import org.jetbrains.annotations.Nullable;
 
-import java.util.ArrayList;
-import java.util.List;
-import java.util.Set;
+import java.util.*;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -50,7 +47,7 @@ public class DartVmServiceEvaluator extends XDebuggerEvaluator {
                        @Nullable final XSourcePosition expressionPosition) {
     final String isolateId = myDebugProcess.getCurrentIsolateId();
     final Project project = myDebugProcess.getSession().getProject();
-    final FileEditorManager manager = FileEditorManager.getInstance(project);
+    final FileEditorManager fileEditorManager = FileEditorManager.getInstance(project);
     PsiElement element = null;
     PsiFile psiFile = null;
     final List<VirtualFile> libraryFiles = new ArrayList<>();
@@ -85,20 +82,19 @@ public class DartVmServiceEvaluator extends XDebuggerEvaluator {
       if (psiFile != null) {
         element = psiFile.findElementAt(expressionPosition.getOffset());
       }
-    }
-    else {
+    } else {
       // TODO(jacobr): we could use the most recently selected Dart file instead
       // of using the selected file.
-      final Editor editor = manager.getSelectedTextEditor();
-      if (editor instanceof TextEditor) {
-        final TextEditor textEditor = (TextEditor)editor;
-        final FileEditorLocation fileEditorLocation = textEditor.getCurrentLocation();
-        final VirtualFile virtualFile = textEditor.getFile();
-        if (virtualFile != null) {
-          psiFile = PsiManager.getInstance(project).findFile(virtualFile);
-          if (psiFile != null && fileEditorLocation instanceof TextEditorLocation) {
-            final TextEditorLocation textEditorLocation = (TextEditorLocation)fileEditorLocation;
-            element = psiFile.findElementAt(textEditor.getEditor().logicalPositionToOffset(textEditorLocation.getPosition()));
+      if (fileEditorManager != null) {
+        final Editor editor = fileEditorManager.getSelectedTextEditor();
+        if (editor instanceof TextEditor textEditor) {
+          final FileEditorLocation fileEditorLocation = textEditor.getCurrentLocation();
+          final VirtualFile virtualFile = textEditor.getFile();
+          if (virtualFile != null) {
+            psiFile = PsiManager.getInstance(project).findFile(virtualFile);
+            if (psiFile != null && fileEditorLocation instanceof TextEditorLocation textEditorLocation) {
+              element = psiFile.findElementAt(textEditor.getEditor().logicalPositionToOffset(textEditorLocation.getPosition()));
+            }
           }
         }
       }
@@ -137,7 +133,7 @@ public class DartVmServiceEvaluator extends XDebuggerEvaluator {
           public void received(Obj response) {
             final Library library = (Library)response;
             for (ClassRef classRef : library.getClasses()) {
-              if (classRef.getName().equals(dartClassName)) {
+              if (Objects.equals(classRef.getName(), dartClassName)) {
                 vmService.evaluateInTargetContext(isolateId, classRef.getId(), expression, wrappedCallback);
                 return;
               }
@@ -161,7 +157,7 @@ public class DartVmServiceEvaluator extends XDebuggerEvaluator {
 
   private LibraryRef findMatchingLibrary(Isolate isolate, List<VirtualFile> libraryFiles) {
     if (libraryFiles != null && !libraryFiles.isEmpty()) {
-      final Set<String> uris = new THashSet<>();
+      final Set<String> uris = new HashSet<>();
 
       for (VirtualFile libraryFile : libraryFiles) {
         uris.addAll(myDebugProcess.getUrisForFile(libraryFile));
@@ -205,7 +201,7 @@ public class DartVmServiceEvaluator extends XDebuggerEvaluator {
     final List<String> lines = StringUtil.split(StringUtil.convertLineSeparators(rawError), "\n");
 
     if (!lines.isEmpty()) {
-      if ((lines.get(0).equals("Error: Unhandled exception:") || lines.get(0).equals("Unhandled exception:")) && lines.size() > 1) {
+      if ((Objects.equals(lines.get(0), "Error: Unhandled exception:") || Objects.equals(lines.get(0), "Unhandled exception:")) && lines.size() > 1) {
         return lines.get(1);
       }
       final Matcher matcher = ERROR_PATTERN.matcher(lines.get(0));

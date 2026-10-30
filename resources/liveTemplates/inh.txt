@@ -1,0 +1,17 @@
+class $NAME$ extends InheritedWidget {
+  const $NAME$({
+    super.key,
+    required Widget child,
+  }) : super(child: child);
+
+  static $NAME$ of(BuildContext context) {
+    final $NAME$? result = context.dependOnInheritedWidgetOfExactType<$NAME$>();
+    assert(result != null, 'No $NAME$ found in context');
+    return result!;
+  }
+
+  @override
+  bool updateShouldNotify($NAME$ old) {
+    return $SHOULD_NOTIFY$;
+  }
+}

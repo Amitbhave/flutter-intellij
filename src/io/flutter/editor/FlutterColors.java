@@ -7,6 +7,7 @@ package io.flutter.editor;
 
 import com.intellij.openapi.diagnostic.Logger;
 import io.flutter.FlutterUtils;
+import io.flutter.logging.PluginLogger;
 import org.jetbrains.annotations.NotNull;
 import org.jetbrains.annotations.Nullable;
 
@@ -17,15 +18,14 @@ import java.util.Map;
 import java.util.Properties;
 
 public class FlutterColors {
-
-  private static final Logger LOG = Logger.getInstance(FlutterColors.class);
+  private static final @NotNull Logger LOG = PluginLogger.createLogger(FlutterColors.class);
 
   public static class FlutterColor {
     @NotNull
     private final Color color;
     private final boolean isPrimary;
 
-    private FlutterColor(@NotNull Color color, boolean isPrimary) {
+    FlutterColor(@NotNull Color color, boolean isPrimary) {
       this.color = color;
       this.isPrimary = isPrimary;
     }
@@ -40,21 +40,20 @@ public class FlutterColors {
     }
   }
 
+  static final String primarySuffix = ".primary";
+  static final String defaultShade = "[500]";
+
   private static final Properties colors;
-
   private static final Map<Color, String> colorToName;
-
-  private static final String primarySuffix = ".primary";
-  private static final String defaultShade = "[500]";
 
   static {
     colors = new Properties();
 
     try {
-      colors.load(FlutterUtils.class.getResourceAsStream("/flutter/colors.properties"));
+      colors.load(FlutterUtils.class.getResourceAsStream("/flutter/colors/material.properties"));
     }
     catch (IOException e) {
-      FlutterUtils.warn(LOG, e);
+      FlutterUtils.warn(LOG, "Failed to load colors", e, true);
     }
 
     colorToName = new HashMap<>();
@@ -95,7 +94,7 @@ public class FlutterColors {
   }
 
   /**
-   * Returns the the shortest material color name matching a color if one exists.
+   * Returns the shortest material color name matching a color if one exists.
    */
   @Nullable
   public static String getColorName(@Nullable Color color) {
@@ -114,7 +113,7 @@ public class FlutterColors {
     return value;
   }
 
-  private static Color parseColor(String hexValue) {
+  static @Nullable Color parseColor(String hexValue) {
     if (hexValue == null) {
       return null;
     }

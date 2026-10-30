@@ -8,13 +8,15 @@ package io.flutter.editor;
 import com.intellij.openapi.diagnostic.Logger;
 import com.intellij.openapi.util.IconLoader;
 import io.flutter.FlutterUtils;
+import io.flutter.logging.PluginLogger;
+import org.jetbrains.annotations.NotNull;
 
-import javax.swing.*;
+import javax.swing.Icon;
 import java.io.IOException;
 import java.util.Properties;
 
 public class FlutterMaterialIcons {
-  private static final Logger LOG = Logger.getInstance(FlutterMaterialIcons.class);
+  private static final @NotNull Logger LOG = PluginLogger.createLogger(FlutterMaterialIcons.class);
 
   private static final Properties icons;
 
@@ -22,16 +24,11 @@ public class FlutterMaterialIcons {
     icons = new Properties();
 
     try {
-      icons.load(FlutterEditorAnnotator.class.getResourceAsStream("/flutter/material_icons.properties"));
+      icons.load(FlutterMaterialIcons.class.getResourceAsStream("/flutter/icons/material.properties"));
     }
     catch (IOException e) {
-      FlutterUtils.warn(LOG, e);
+      FlutterUtils.warn(LOG, "Failed to load material icons", e, true);
     }
-  }
-
-  public static Icon getIconForHex(String hexValue) {
-    final String iconName = icons.getProperty(hexValue + ".codepoint");
-    return getIcon(iconName);
   }
 
   public static Icon getIconForName(String name) {
@@ -46,6 +43,6 @@ public class FlutterMaterialIcons {
     if (path == null) {
       return null;
     }
-    return IconLoader.findIcon(path, FlutterMaterialIcons.class);
+    return IconLoader.findIcon("/flutter/icons/" + path, FlutterMaterialIcons.class);
   }
 }

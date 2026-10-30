@@ -13,10 +13,11 @@ import com.intellij.openapi.vfs.VirtualFile;
 import com.intellij.xdebugger.XSourcePosition;
 import com.jetbrains.lang.dart.util.DartUrlResolver;
 import com.jetbrains.lang.dart.util.DartUrlResolverImpl;
-import io.flutter.vmService.DartVmServiceDebugProcess;
 import io.flutter.testing.ProjectFixture;
 import io.flutter.testing.TestDir;
 import io.flutter.testing.Testing;
+import io.flutter.utils.OpenApiUtils;
+import io.flutter.vmService.DartVmServiceDebugProcess;
 import org.dartlang.vm.service.element.LibraryRef;
 import org.dartlang.vm.service.element.Script;
 import org.dartlang.vm.service.element.ScriptRef;
@@ -72,7 +73,7 @@ public class FlutterPositionMapperTest {
     final XSourcePosition pos = mapper.getSourcePosition("1", makeScriptRef("2", "some/stuff/to/ignore/lib/hello.dart"), 123);
     assertNotNull(pos);
     assertEquals(pos.getFile(), hello);
-    assertEquals(pos.getLine(), 9); // zero-based
+    assertEquals(9, pos.getLine()); // zero-based
   }
 
   @Test
@@ -89,15 +90,18 @@ public class FlutterPositionMapperTest {
     final XSourcePosition pos = mapper.getSourcePosition("1", makeScriptRef("2", "remote:root/lib/hello.dart"), 123);
     assertNotNull(pos);
     assertEquals(pos.getFile(), hello);
-    assertEquals(pos.getLine(), 9); // zero-based
+    assertEquals(9, pos.getLine()); // zero-based
   }
 
   @NotNull
   private FlutterPositionMapper setUpMapper(VirtualFile contextFile, String remoteBaseUri) {
-    final DartUrlResolver resolver = new DartUrlResolverImpl(fixture.getProject(), contextFile);
-    final FlutterPositionMapper mapper = new FlutterPositionMapper(fixture.getProject(), sourceRoot, resolver, null);
-    mapper.onConnect(scripts, remoteBaseUri);
-    return mapper;
+    final FlutterPositionMapper[] mapper = new FlutterPositionMapper[1];
+    OpenApiUtils.safeRunReadAction(() -> {
+      final DartUrlResolver resolver = new DartUrlResolverImpl(fixture.getProject(), contextFile);
+      mapper[0] = new FlutterPositionMapper(fixture.getProject(), sourceRoot, resolver);
+      mapper[0].onConnect(scripts, remoteBaseUri);
+    });
+    return mapper[0];
   }
 
   private LibraryRef makeLibraryRef(String uri) {

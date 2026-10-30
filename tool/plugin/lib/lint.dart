@@ -6,18 +6,23 @@ import 'dart:io';
 
 import 'package:args/command_runner.dart';
 
-import 'plugin.dart';
+import 'runner.dart';
+import 'util.dart';
 
-class LintCommand extends Command {
+class LintCommand extends Command<int> {
+  @override
   final BuildCommandRunner runner;
 
   LintCommand(this.runner);
 
+  @override
   String get name => 'lint';
 
+  @override
   String get description =>
       'Perform simple validations on the flutter-intellij repo code.';
 
+  @override
   Future<int> run() async {
     // Check for unintentionally imported annotations.
     if (checkForBadImports()) {
@@ -36,9 +41,13 @@ class LintCommand extends Command {
     final result = Process.runSync(
       'git',
       // Note: extra quotes added so grep doesn't match this file.
-      ['grep', 'import com.jetbrains.' 'lang.dart.'],
+      [
+        'grep',
+        'import com.jetbrains.'
+            'lang.dart.',
+      ],
     );
-    final String imports = result.stdout.trim();
+    final String imports = (result.stdout as String).trim();
 
     // path:import
     final usages = <String, List<String>>{};
@@ -54,7 +63,7 @@ class LintCommand extends Command {
       if (import.startsWith('import ')) import = import.substring(7);
       if (import.endsWith(';')) import = import.substring(0, import.length - 1);
       usages.putIfAbsent(import, () => []);
-      usages[import].add(place);
+      usages[import]!.add(place);
     });
 
     // print report
@@ -67,7 +76,9 @@ class LintCommand extends Command {
     for (var import in keys) {
       print('$import:');
       var places = usages[import];
-      places.forEach((String place) => print('  $place'));
+      for (var place in places!) {
+        print('  $place');
+      }
       print('');
     }
   }
@@ -80,24 +91,37 @@ class LintCommand extends Command {
       'com.android.annotations.NonNull',
       'io.netty.',
       'javax.annotation.Nullable',
-       // Not technically a bad import, but we are using
-       // org.apache.commons.lang.StringUtils already in the codebase.
+      // org.apache.commons.lang.StringUtils and
+      // org.apache.commons.lang.StringEscapeUtils are being deprecated,
+      // use org.apache.commons.lang3.* instead.
+      // See https://github.com/flutter/flutter-intellij/issues/6933
+      'org.apache.commons.lang.StringUtils',
+      'org.apache.commons.lang.StringEscapeUtils',
+      // https://github.com/dart-lang/sdk/issues/39377
       'org.apache.commons.lang3.StringUtils',
+      // org.apache.commons.lang3.StringEscapeUtils is deprecated
+      'org.apache.commons.lang3.StringEscapeUtils',
 
       // Not technically a bad import, but not all IntelliJ platforms provide
       // this library.
       'org.apache.commons.io.',
+
+      // gnu.trove. classes seem to all be deprecated, avoid into the future
+      'gnu.trove.',
+
+      // Prefer to use built-in Java collections or fastutil.
+      'com.android.tools.idea.io.netty.util.collection.',
+
+      // Internal APIs that shouldn't be used by 3p plugins:
+      'com.intellij.util.PlatformUtils',
     ];
 
     for (var import in proscribedImports) {
       print('Checking for import of "$import"...');
 
-      final result = Process.runSync(
-        'git',
-        ['grep', 'import $import'],
-      );
+      final result = Process.runSync('git', ['grep', 'import $import']);
 
-      final String results = result.stdout.trim();
+      final String results = (result.stdout as String).trim();
       if (results.isNotEmpty) {
         print('Found proscribed imports:\n');
         print(results);
@@ -107,19 +131,14 @@ class LintCommand extends Command {
       }
     }
 
-    final partialImports = [
-      'com.sun.',
-    ];
+    final partialImports = ['com.sun.'];
 
     for (var import in partialImports) {
       print('Checking for import of "$import"...');
 
-      final result = Process.runSync(
-        'git',
-        ['grep', 'import $import'],
-      );
+      final result = Process.runSync('git', ['grep', 'import $import']);
 
-      final String results = result.stdout.trim();
+      final String results = (result.stdout as String).trim();
       if (results.isNotEmpty) {
         print('Found proscribed imports:\n');
         print(results);

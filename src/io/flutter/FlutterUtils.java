@@ -5,54 +5,57 @@
  */
 package io.flutter;
 
-import com.google.common.base.Charsets;
-import com.intellij.execution.ExecutionException;
-import com.intellij.execution.configurations.GeneralCommandLine;
-import com.intellij.execution.util.ExecUtil;
 import com.intellij.ide.actions.ShowSettingsUtilImpl;
-import com.intellij.ide.impl.ProjectUtil;
 import com.intellij.ide.util.PropertiesComponent;
 import com.intellij.openapi.application.ApplicationInfo;
-import com.intellij.openapi.application.ApplicationManager;
-import com.intellij.openapi.application.ModalityState;
 import com.intellij.openapi.diagnostic.Logger;
 import com.intellij.openapi.extensions.PluginId;
 import com.intellij.openapi.module.Module;
-import com.intellij.openapi.module.ModuleManager;
-import com.intellij.openapi.progress.ProcessCanceledException;
 import com.intellij.openapi.project.Project;
-import com.intellij.openapi.project.ProjectManager;
+import com.intellij.openapi.roots.ContentEntry;
 import com.intellij.openapi.roots.ModuleRootManager;
 import com.intellij.openapi.roots.ModuleSourceOrderEntry;
 import com.intellij.openapi.roots.OrderEntry;
+import com.intellij.openapi.roots.SourceFolder;
 import com.intellij.openapi.util.text.StringUtil;
 import com.intellij.openapi.vfs.LocalFileSystem;
+import com.intellij.openapi.vfs.VfsUtil;
 import com.intellij.openapi.vfs.VirtualFile;
+import com.intellij.psi.PsiDirectory;
 import com.intellij.psi.PsiElement;
 import com.intellij.psi.PsiFile;
-import com.intellij.testFramework.LightVirtualFile;
-import com.intellij.util.PlatformUtils;
 import com.jetbrains.lang.dart.DartFileType;
 import com.jetbrains.lang.dart.psi.DartFile;
+import io.flutter.jxbrowser.EmbeddedJxBrowser;
+import io.flutter.jxbrowser.JxBrowserStatus;
 import io.flutter.pub.PubRoot;
 import io.flutter.pub.PubRootCache;
+import io.flutter.settings.FlutterSettings;
 import io.flutter.utils.AndroidUtils;
 import io.flutter.utils.FlutterModuleUtils;
-import java.io.IOException;
-import java.io.InputStreamReader;
-import java.util.Map;
-import java.util.Objects;
-import java.util.Properties;
-import java.util.regex.Pattern;
+import io.flutter.utils.OpenApiUtils;
+import io.flutter.view.EmbeddedBrowser;
+import io.flutter.view.EmbeddedJcefBrowser;
 import org.jetbrains.annotations.NotNull;
 import org.jetbrains.annotations.Nullable;
 import org.jetbrains.annotations.SystemIndependent;
 import org.yaml.snakeyaml.DumperOptions;
+import org.yaml.snakeyaml.LoaderOptions;
 import org.yaml.snakeyaml.Yaml;
 import org.yaml.snakeyaml.constructor.SafeConstructor;
 import org.yaml.snakeyaml.nodes.Tag;
 import org.yaml.snakeyaml.representer.Representer;
 import org.yaml.snakeyaml.resolver.Resolver;
+
+import java.io.IOException;
+import java.io.InputStreamReader;
+import java.lang.reflect.InvocationTargetException;
+import java.lang.reflect.Method;
+import java.nio.charset.StandardCharsets;
+import java.util.Map;
+import java.util.Objects;
+import java.util.Properties;
+import java.util.regex.Pattern;
 
 public class FlutterUtils {
   public static class FlutterPubspecInfo {
@@ -60,6 +63,7 @@ public class FlutterUtils {
 
     private boolean flutter = false;
     private boolean plugin = false;
+    private boolean resolutionWorkspace = false;
 
     FlutterPubspecInfo(long modificationStamp) {
       this.modificationStamp = modificationStamp;
@@ -71,6 +75,10 @@ public class FlutterUtils {
 
     public boolean isFlutterPlugin() {
       return plugin;
+    }
+
+    public boolean isResolutionWorkspace() {
+      return resolutionWorkspace;
     }
 
     public long getModificationStamp() {
@@ -85,53 +93,61 @@ public class FlutterUtils {
   private FlutterUtils() {
   }
 
-  /**
-   * This method exists for compatibility with older IntelliJ API versions.
-   * <p>
-   * `Application.invokeAndWait(Runnable)` doesn't exist pre 2016.3.
-   */
-  public static void invokeAndWait(@NotNull Runnable runnable) throws ProcessCanceledException {
-    ApplicationManager.getApplication().invokeAndWait(
-      runnable,
-      ModalityState.defaultModalityState());
-  }
-
-  public static boolean isFlutteryFile(@NotNull VirtualFile file) {
-    return isDartFile(file) || PubRoot.isPubspec(file);
-  }
-
-  public static boolean couldContainWidgets(@Nullable VirtualFile file) {
-    // Skip temp file used to show things like files downloaded from the VM.
-    if (file instanceof LightVirtualFile) {
-      return false;
-    }
-    // TODO(jacobr): we might also want to filter for files not under the current project root.
-    return file != null && isDartFile(file);
-  }
-
   public static boolean isDartFile(@NotNull VirtualFile file) {
     return Objects.equals(file.getFileType(), DartFileType.INSTANCE);
   }
 
   public static boolean isAndroidStudio() {
-    return StringUtil.equals(PlatformUtils.getPlatformPrefix(), "AndroidStudio");
+    try {
+      // The class is available if the IDE has the "Android" plugin installed or is Android Studio.
+      final Class<?> ideInfoClass = Class.forName("com.android.tools.idea.IdeInfo");
+      final Method getInstance = ideInfoClass.getMethod("getInstance");
+      final Object instance = getInstance.invoke(null);
+      final Method isAndroidStudio = ideInfoClass.getMethod("isAndroidStudio");
+      return (Boolean)isAndroidStudio.invoke(instance);
+    }
+    catch (ClassNotFoundException | NoSuchMethodException | IllegalAccessException | InvocationTargetException ignored) {
+      // Fall back to checking application name
+      // e.g., "Android Studio Meerkat | 2024.3.1"
+      return ApplicationInfo.getInstance().getFullApplicationName().startsWith("Android Studio");
+    }
+  }
+
+  public static void info(@NotNull Logger logger, @NotNull String message, @NotNull Throwable t, boolean sanitizePaths) {
+    if (sanitizePaths && FlutterSettings.getInstance().isFilePathLoggingEnabled()) {
+      logger.info(message, t);
+    }
+    else {
+      logger.info(message);
+    }
+  }
+
+  public static void warn(@NotNull Logger logger, @NotNull String message, @NotNull Throwable t, boolean sanitizePaths) {
+    if (sanitizePaths && FlutterSettings.getInstance().isFilePathLoggingEnabled()) {
+      logger.warn(message, t);
+    }
+    else {
+      logger.warn(message);
+    }
+  }
+
+  public static void error(@NotNull Logger logger, @NotNull String message, @NotNull Throwable t, boolean sanitizePaths) {
+    if (sanitizePaths && FlutterSettings.getInstance().isFilePathLoggingEnabled()) {
+      logger.error(message, t);
+    }
+    else {
+      logger.error(message);
+    }
   }
 
   /**
    * Write a warning message to the IntelliJ log.
    * <p>
    * This is separate from LOG.warn() to allow us to decorate the behavior.
-   */
-  public static void warn(Logger logger, @NotNull Throwable t) {
-    logger.warn(t);
-  }
-
-  /**
-   * Write a warning message to the IntelliJ log.
    * <p>
-   * This is separate from LOG.warn() to allow us to decorate the behavior.
+   * This method is deprecated (as we are not decorating this behavior anywhere).
    */
-  public static void warn(Logger logger, String message) {
+  public static void warn(@NotNull Logger logger, @NotNull String message) {
     logger.warn(message);
   }
 
@@ -139,17 +155,11 @@ public class FlutterUtils {
    * Write a warning message to the IntelliJ log.
    * <p>
    * This is separate from LOG.warn() to allow us to decorate the behavior.
+   * <p>
+   * This method is deprecated (as we are not decorating this behavior anywhere).
    */
-  public static void warn(Logger logger, String message, @NotNull Throwable t) {
+  public static void warn(@NotNull Logger logger, @NotNull String message, @NotNull Throwable t) {
     logger.warn(message, t);
-  }
-
-  private static int getBaselineVersion() {
-    final ApplicationInfo appInfo = ApplicationInfo.getInstance();
-    if (appInfo != null) {
-      return appInfo.getBuild().getBaselineVersion();
-    }
-    return -1;
   }
 
   public static void disableGradleProjectMigrationNotification(@NotNull Project project) {
@@ -161,19 +171,23 @@ public class FlutterUtils {
     }
   }
 
-  public static boolean exists(@Nullable VirtualFile file) {
-    return file != null && file.exists();
-  }
-
   /**
    * Test if the given element is contained in a module with a pub root that declares a flutter dependency.
    */
   public static boolean isInFlutterProject(@NotNull Project project, @NotNull PsiElement element) {
     final PsiFile file = element.getContainingFile();
+    final PubRoot pubRoot;
     if (file == null) {
-      return false;
+      if (element instanceof PsiDirectory) {
+        pubRoot = PubRootCache.getInstance(project).getRoot(((PsiDirectory)element).getVirtualFile());
+      }
+      else {
+        return false;
+      }
     }
-    final PubRoot pubRoot = PubRootCache.getInstance(project).getRoot(file);
+    else {
+      pubRoot = PubRootCache.getInstance(project).getRoot(file);
+    }
     if (pubRoot == null) {
       return false;
     }
@@ -187,29 +201,65 @@ public class FlutterUtils {
     final PubRoot root = PubRootCache.getInstance(file.getProject()).getRoot(file.getVirtualFile().getParent());
     if (root == null) return false;
 
-    // Check that we're in a project path that starts with 'test/'.
-    final String relativePath = root.getRelativePath(file.getVirtualFile());
-    if (relativePath == null || !relativePath.startsWith("test/")) {
+    //noinspection ConstantConditions
+    VirtualFile dir = file.getVirtualFile().getParent();
+    if (dir == null) {
       return false;
+    }
+    final Module module = root.getModule(file.getProject());
+    if (!root.hasTests(dir)) {
+      if (!isInTestOrSourceRoot(module, file)) {
+        return false;
+      }
     }
 
     // Check that we're in a Flutter module.
-    return FlutterModuleUtils.isFlutterModule(root.getModule(file.getProject()));
+    return FlutterModuleUtils.isFlutterModule(module);
+  }
+
+  private static boolean isInTestOrSourceRoot(@Nullable Module module, @NotNull DartFile file) {
+    if (module == null) {
+      return false;
+    }
+    final ModuleRootManager manager = ModuleRootManager.getInstance(module);
+    if (manager == null) {
+      return false;
+    }
+    final ContentEntry[] entries = manager.getContentEntries();
+    final VirtualFile virtualFile = file.getContainingFile().getVirtualFile();
+    boolean foundSourceRoot = false;
+    for (ContentEntry entry : entries) {
+      for (SourceFolder folder : entry.getSourceFolders()) {
+        final VirtualFile folderFile = folder.getFile();
+        if (folderFile == null) {
+          continue;
+        }
+        if (folderFile.equals(VfsUtil.getCommonAncestor(folderFile, virtualFile))) {
+          if (folder.getRootType().isForTests()) {
+            return true; // Test file is in a directory marked as a test source root, but not named 'test'.
+          }
+          else {
+            foundSourceRoot = true;
+            break;
+          }
+        }
+      }
+    }
+    if (foundSourceRoot) {
+      // The file is in a sources root but not marked as tests.
+      return file.getName().endsWith(("_test.dart")) && FlutterSettings.getInstance().isAllowTestsInSourcesRoot();
+    }
+    return false;
   }
 
   public static boolean isIntegrationTestingMode() {
-    return System.getProperty("idea.required.plugins.id", "").equals("io.flutter.tests.gui.flutter-gui-tests");
-  }
-
-  @Nullable
-  public static VirtualFile getRealVirtualFile(@Nullable PsiFile psiFile) {
-    return psiFile != null ? psiFile.getOriginalFile().getVirtualFile() : null;
+    return Objects.equals(System.getProperty("idea.required.plugins.id", ""), "io.flutter.tests.gui.flutter-gui-tests");
   }
 
   @NotNull
   public static VirtualFile getProjectRoot(@NotNull Project project) {
     assert !project.isDefault();
-    @SystemIndependent String path = project.getBasePath();
+    @SystemIndependent final String path = project.getBasePath();
     assert path != null;
     final VirtualFile file = LocalFileSystem.getInstance().findFileByPath(path);
     return Objects.requireNonNull(file);
@@ -219,7 +269,7 @@ public class FlutterUtils {
    * Returns the Dart file for the given PsiElement, or null if not a match.
    */
   @Nullable
-  public static DartFile getDartFile(final @Nullable PsiElement elt) {
+  public static DartFile getDartFile(@Nullable final PsiElement elt) {
     if (elt == null) return null;
 
     final PsiFile psiFile = elt.getContainingFile();
@@ -296,24 +346,9 @@ public class FlutterUtils {
     return name.endsWith(".xcworkspace");
   }
 
-  /**
-   * Checks whether the given commandline executes cleanly.
-   *
-   * @param cmd the command
-   * @return true if the command runs cleanly
-   */
-  public static boolean runsCleanly(@NotNull GeneralCommandLine cmd) {
-    try {
-      return ExecUtil.execAndGetOutput(cmd).getExitCode() == 0;
-    }
-    catch (ExecutionException e) {
-      return false;
-    }
-  }
-
   @NotNull
   public static PluginId getPluginId() {
-    final PluginId pluginId = PluginId.findId("io.flutter");
+    final PluginId pluginId = PluginId.getId("io.flutter");
     assert pluginId != null;
     return pluginId;
   }
@@ -322,6 +357,7 @@ public class FlutterUtils {
    * Returns a structured object with information about the Flutter properties of the given
    * pubspec file.
    */
+  @NotNull
   public static FlutterPubspecInfo getFlutterPubspecInfo(@NotNull final VirtualFile pubspec) {
     // It uses Flutter if it contains 'dependencies: flutter'.
     // It's a plugin if it contains 'flutter: plugin'.
@@ -341,13 +377,20 @@ public class FlutterUtils {
         final Object dependencies = yamlMap.get("dependencies");
         if (dependencies instanceof Map) {
           // We use `|=` for assigning to 'flutter' below as it might have been assigned to true above.
-          info.flutter |= ((Map)dependencies).containsKey("flutter");
+          info.flutter |= ((Map<?, ?>)dependencies).containsKey("flutter");
         }
 
         // Check for a Flutter plugin.
         final Object flutterEntry = yamlMap.get("flutter");
         if (flutterEntry instanceof Map) {
-          info.plugin = ((Map)flutterEntry).containsKey("plugin");
+          info.plugin = ((Map<?, ?>)flutterEntry).containsKey("plugin");
+        }
+
+        // Check for resolution configuration.
+        //  https://dart.dev/tools/pub/workspaces
+        final Object resolutionEntry = yamlMap.get("resolution");
+        if (resolutionEntry instanceof String) {
+          info.resolutionWorkspace = StringUtil.equals((String)resolutionEntry, "workspace");
         }
       }
     }
@@ -372,90 +415,42 @@ public class FlutterUtils {
     return getFlutterPubspecInfo(pubspec).isFlutterPlugin();
   }
 
-  /**
-   * Return the project located at the <code>path</code> or containing it.
-   *
-   * @param path The path to a project or one of its files
-   * @return The Project located at the path
-   */
   @Nullable
-  public static Project findProject(@NotNull String path) {
-    for (Project project : ProjectManager.getInstance().getOpenProjects()) {
-      if (ProjectUtil.isSameProject(path, project)) {
-        return project;
-      }
-    }
-    return null;
-  }
-
   private static Map<String, Object> readPubspecFileToMap(@NotNull final VirtualFile pubspec) throws IOException {
     final String contents = new String(pubspec.contentsToByteArray(true /* cache contents */));
     return loadPubspecInfo(contents);
   }
 
+  @Nullable
   private static Map<String, Object> loadPubspecInfo(@NotNull String yamlContents) {
-    final Yaml yaml = new Yaml(new SafeConstructor(), new Representer(), new DumperOptions(), new Resolver() {
-      @Override
-      protected void addImplicitResolvers() {
-        this.addImplicitResolver(Tag.BOOL, BOOL, "yYnNtTfFoO");
-        this.addImplicitResolver(Tag.NULL, NULL, "~nN\u0000");
-        this.addImplicitResolver(Tag.NULL, EMPTY, null);
-        this.addImplicitResolver(new Tag("tag:yaml.org,2002:value"), VALUE, "=");
-        this.addImplicitResolver(Tag.MERGE, MERGE, "<");
-      }
-    });
+    final Yaml yaml =
+      new Yaml(new SafeConstructor(new LoaderOptions()), new Representer(new DumperOptions()), new DumperOptions(), new Resolver() {
+        @Override
+        protected void addImplicitResolvers() {
+          this.addImplicitResolver(Tag.BOOL, BOOL, "yYnNtTfFoO");
+          this.addImplicitResolver(Tag.NULL, NULL, "~nN\u0000");
+          this.addImplicitResolver(Tag.NULL, EMPTY, null);
+          this.addImplicitResolver(new Tag("tag:yaml.org,2002:value"), VALUE, "=");
+          this.addImplicitResolver(Tag.MERGE, MERGE, "<");
+        }
+      });
 
     try {
-      //noinspection unchecked
-      return (Map)yaml.load(yamlContents);
+      return yaml.load(yamlContents);
     }
     catch (Exception e) {
       return null;
     }
   }
 
-  public static boolean isAndroidxProject(@NotNull Project project) {
-    @SystemIndependent String basePath = project.getBasePath();
-    assert basePath != null;
-    VirtualFile projectDir = LocalFileSystem.getInstance().findFileByPath(basePath);
-    assert projectDir != null;
-    VirtualFile androidDir = getFlutterManagedAndroidDir(projectDir);
-    if (androidDir == null) {
-      androidDir = getAndroidProjectDir(projectDir);
-      if (androidDir == null) {
-        return false;
-      }
-    }
-    VirtualFile propFile = androidDir.findChild("gradle.properties");
-    if (propFile == null) {
-      return false;
-    }
-    Properties properties = new Properties();
-    try {
-      properties.load(new InputStreamReader(propFile.getInputStream(), Charsets.UTF_8));
-    }
-    catch (IOException ex) {
-      return false;
-    }
-    String value = properties.getProperty("android.useAndroidX");
-    if (value != null) {
-      return Boolean.parseBoolean(value);
-    }
-    return false;
-  }
-
-  private static VirtualFile getAndroidProjectDir(VirtualFile dir) {
-    return (dir.findChild("app") == null) ? null : dir;
-  }
-
   @Nullable
   private static VirtualFile getFlutterManagedAndroidDir(VirtualFile dir) {
-    VirtualFile meta = dir.findChild(".metadata");
+    final VirtualFile meta = dir.findChild(".metadata");
     if (meta != null) {
       try {
-        Properties properties = new Properties();
-        properties.load(new InputStreamReader(meta.getInputStream(), Charsets.UTF_8));
-        String value = properties.getProperty("project_type");
+        final Properties properties = new Properties();
+        properties.load(new InputStreamReader(meta.getInputStream(), StandardCharsets.UTF_8));
+        final String value = properties.getProperty("project_type");
         if (value == null) {
           return null;
         }
@@ -484,6 +479,7 @@ public class FlutterUtils {
       return android;
     }
     android = dir.findFileByRelativePath("example/android");
+    //noinspection RedundantIfStatement
     if (android != null) {
       return android;
     }
@@ -492,8 +488,9 @@ public class FlutterUtils {
 
   @Nullable
   public static Module findModuleNamed(@NotNull Project project, @NotNull String name) {
-    Module[] modules = ModuleManager.getInstance(project).getModules();
+    final Module[] modules = OpenApiUtils.getModules(project);
     for (Module module : modules) {
+      assert module != null;
       if (module.getName().equals(name)) {
         return module;
       }
@@ -501,7 +498,8 @@ public class FlutterUtils {
     return null;
   }
 
-  public static String flutterGradleModuleName(Project project) {
+  @NotNull
+  public static String flutterGradleModuleName(@NotNull Project project) {
     return project.getName().replaceAll(" ", "_") + "." + AndroidUtils.FLUTTER_MODULE_NAME;
   }
 
@@ -521,11 +519,11 @@ public class FlutterUtils {
       return null;
     }
     file = file.getParent().getParent();
-    VirtualFile meta = file.findChild(".metadata");
+    final VirtualFile meta = file.findChild(".metadata");
     if (meta == null) {
       return null;
     }
-    VirtualFile android = getFlutterManagedAndroidDir(meta.getParent());
+    final VirtualFile android = getFlutterManagedAndroidDir(meta.getParent());
     if (android != null && android.getName().equals(".android")) {
       return module; // Only true for Flutter modules.
     }
@@ -534,22 +532,42 @@ public class FlutterUtils {
 
   @Nullable
   public static VirtualFile locateModuleRoot(@NotNull Module module) {
-    ModuleSourceOrderEntry entry = findModuleSourceEntry(module);
+    final ModuleSourceOrderEntry entry = findModuleSourceEntry(module);
     if (entry == null) return null;
-    VirtualFile[] roots = entry.getRootModel().getContentRoots();
+    final VirtualFile[] roots = entry.getRootModel().getContentRoots();
     if (roots.length == 0) return null;
     return roots[0];
   }
 
   @Nullable
   private static ModuleSourceOrderEntry findModuleSourceEntry(@NotNull Module module) {
-    ModuleRootManager moduleRootManager = ModuleRootManager.getInstance(module);
-    OrderEntry[] orderEntries = moduleRootManager.getOrderEntries();
+    final ModuleRootManager moduleRootManager = ModuleRootManager.getInstance(module);
+    final OrderEntry[] orderEntries = moduleRootManager.getOrderEntries();
     for (OrderEntry entry : orderEntries) {
       if (entry instanceof ModuleSourceOrderEntry) {
         return (ModuleSourceOrderEntry)entry;
       }
     }
     return null;
+  }
+
+  // TODO(helin24): Make other usages of embedded browser initialization safe for UI?
+  @Nullable
+  public static EmbeddedBrowser embeddedBrowser(Project project) {
+    if (project == null || project.isDisposed()) {
+      return null;
+    }
+
+    FlutterSettings settings = FlutterSettings.getInstance();
+
+    return settings.isEnableJcefBrowser()
+           ? EmbeddedJcefBrowser.getInstance(project)
+           : EmbeddedJxBrowser.getInstance(project);
+  }
+
+  public static boolean embeddedBrowserAvailable(JxBrowserStatus status) {
+    return Objects.equals(status, JxBrowserStatus.INSTALLED) ||
+           status.equals(JxBrowserStatus.INSTALLATION_SKIPPED) && FlutterSettings.getInstance()
+             .isEnableJcefBrowser();
   }
 }

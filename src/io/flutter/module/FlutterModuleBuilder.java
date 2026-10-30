@@ -5,10 +5,10 @@
  */
 package io.flutter.module;
 
-import static java.util.Arrays.asList;
-
 import com.intellij.execution.OutputListener;
 import com.intellij.execution.process.ProcessListener;
+import com.intellij.ide.projectView.ProjectView;
+import com.intellij.ide.projectView.impl.ProjectViewPane;
 import com.intellij.ide.util.projectWizard.ModuleBuilder;
 import com.intellij.ide.util.projectWizard.ModuleWizardStep;
 import com.intellij.ide.util.projectWizard.SettingsStep;
@@ -16,13 +16,11 @@ import com.intellij.ide.util.projectWizard.WizardContext;
 import com.intellij.openapi.Disposable;
 import com.intellij.openapi.application.WriteAction;
 import com.intellij.openapi.diagnostic.Logger;
-import com.intellij.openapi.module.ModifiableModuleModel;
+import com.intellij.openapi.module.*;
 import com.intellij.openapi.module.Module;
-import com.intellij.openapi.module.ModuleManager;
-import com.intellij.openapi.module.ModuleType;
-import com.intellij.openapi.module.ModuleWithNameAlreadyExists;
 import com.intellij.openapi.options.ConfigurationException;
 import com.intellij.openapi.progress.ProgressManager;
+import com.intellij.openapi.project.DumbService;
 import com.intellij.openapi.project.Project;
 import com.intellij.openapi.roots.ModifiableRootModel;
 import com.intellij.openapi.ui.Messages;
@@ -36,30 +34,33 @@ import io.flutter.FlutterConstants;
 import io.flutter.FlutterMessages;
 import io.flutter.FlutterUtils;
 import io.flutter.actions.FlutterDoctorAction;
+import io.flutter.logging.PluginLogger;
 import io.flutter.module.settings.FlutterCreateAdditionalSettingsFields;
+import io.flutter.module.settings.SettingsHelpForm;
 import io.flutter.pub.PubRoot;
 import io.flutter.sdk.FlutterCreateAdditionalSettings;
 import io.flutter.sdk.FlutterSdk;
 import io.flutter.sdk.FlutterSdkUtil;
 import io.flutter.utils.AndroidUtils;
 import io.flutter.utils.FlutterModuleUtils;
-
-import java.io.IOException;
-import java.util.concurrent.atomic.AtomicReference;
-import javax.swing.ComboBoxEditor;
-import javax.swing.Icon;
-import javax.swing.JComponent;
-
-import org.apache.commons.lang.StringUtils;
+import io.flutter.utils.OpenApiUtils;
 import org.jetbrains.annotations.NotNull;
 import org.jetbrains.annotations.Nullable;
 
-public class FlutterModuleBuilder extends ModuleBuilder {
-  private static final Logger LOG = Logger.getInstance(FlutterModuleBuilder.class);
+import javax.swing.*;
+import java.io.IOException;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.util.concurrent.atomic.AtomicReference;
 
-  private FlutterModuleWizardStep myStep;
+import static java.util.Arrays.asList;
+
+public class FlutterModuleBuilder extends ModuleBuilder {
+  private static final @NotNull Logger LOG = PluginLogger.createLogger(FlutterModuleBuilder.class);
+
+  protected FlutterModuleWizardStep myStep;
   private FlutterCreateAdditionalSettingsFields mySettingsFields;
-  private Project myProject;
+  protected Project myProject;
 
   @Override
   public String getName() {
@@ -118,7 +119,9 @@ public class FlutterModuleBuilder extends ModuleBuilder {
     }
 
     final OutputListener listener = new OutputListener();
-    final PubRoot root = runFlutterCreateWithProgress(baseDir, sdk, project, listener, getAdditionalSettings());
+    @NotNull final FlutterCreateAdditionalSettings settings = getAdditionalSettings();
+    settings.setProjectName(super.getName());
+    final PubRoot root = runFlutterCreateWithProgress(baseDir, sdk, project, listener, settings);
     if (root == null) {
       final String stderr = listener.getOutput().getStderr();
       final String msg = stderr.isEmpty() ? "Flutter create command was unsuccessful" : stderr;
@@ -137,42 +140,61 @@ public class FlutterModuleBuilder extends ModuleBuilder {
     }
 
     FlutterModuleUtils.autoShowMain(project, root);
-
-    if (!(AndroidUtils.isAndroidProject(getProject()) &&
-          (getAdditionalSettings().getType() == FlutterProjectType.MODULE))) {
-      addAndroidModule(project, model, basePath, flutter.getName());
-    }
+    showProjectInProjectWindow(project);
     return flutter;
   }
 
-  private static String validateSettings(FlutterCreateAdditionalSettings settings) {
+  private void showProjectInProjectWindow(@NotNull Project project) {
+    OpenApiUtils.safeInvokeLater(() -> {
+      DumbService.getInstance(project).runWhenSmart(() -> {
+        OpenApiUtils.safeInvokeLater(() -> {
+          ProjectView view = ProjectView.getInstance(project);
+          if (view == null) return;
+          view.changeView(ProjectViewPane.ID);
+        });
+      });
+    });
+  }
+
+  private String validateSettings(FlutterCreateAdditionalSettings settings) {
     final String description = settings.getDescription();
     if (description != null && description.contains(": ")) {
-      return "Invalid package description: '" + description + "' - cannot contain the sequence ': '.";
+      return FlutterBundle.message("npw_invalid_desc_error", description);
     }
     final String org = settings.getOrg();
     if (org == null) {
       return null;
     }
-    if (StringUtils.endsWith(org, ".")) {
-      return "Invalid organization name: '" + org + "' - cannot end in '.'.";
+    if (StringUtil.endsWith(org, ".")) {
+      return FlutterBundle.message("npw_invalid_org_error", org);
+    }
+    if (mySettingsFields.shouldIncludePlatforms() && !settings.isSomePlatformSelected()) {
+      return FlutterBundle.message("npw_none_selected_error");
     }
     // Invalid package names will cause issues down the line.
     return AndroidUtils.validateAndroidPackageName(org);
   }
 
-  private static void addAndroidModule(@NotNull Project project,
-                                       @Nullable ModifiableModuleModel model,
-                                       @NotNull String baseDirPath,
-                                       @NotNull String flutterModuleName) {
+  public static void addAndroidModule(@NotNull Project project,
+                                      @Nullable ModifiableModuleModel model,
+                                      @NotNull String baseDirPath,
+                                      @NotNull String flutterModuleName,
+                                      boolean isTopLevel) {
     final VirtualFile baseDir = LocalFileSystem.getInstance().refreshAndFindFileByPath(baseDirPath);
     if (baseDir == null) {
       return;
     }
 
-    final VirtualFile androidFile = findAndroidModuleFile(baseDir, flutterModuleName);
+    final VirtualFile androidFile = isTopLevel
+                                    ? findAndroidModuleFile(baseDir, flutterModuleName)
+                                    : findEmbeddedModuleFile(baseDir, flutterModuleName);
     if (androidFile == null) return;
+    addAndroidModuleFromFile(project, model, androidFile);
+  }
 
+  public static void addAndroidModuleFromFile(@NotNull Project project,
+                                              @Nullable ModifiableModuleModel model,
+                                              @NotNull VirtualFile androidFile) {
     try {
       final ModifiableModuleModel toCommit;
       if (model == null) {
@@ -184,14 +206,25 @@ public class FlutterModuleBuilder extends ModuleBuilder {
         toCommit = null;
       }
 
-      model.loadModule(androidFile.getPath());
+      Module newModule = model.loadModule(androidFile.getPath());
 
       if (toCommit != null) {
-        WriteAction.run(toCommit::commit);
+        OpenApiUtils.safeInvokeLater(() -> {
+          // This check was due to https://github.com/flutter/flutter-intellij/issues/7306:
+          if (project.isDisposed()) {
+            return;
+          }
+          // This check isn't normally needed but can prevent scary problems during testing.
+          // Even if .idea is removed modules may still be created from something in the cache files
+          // if the project had been opened previously.
+          if (ModuleManager.getInstance(project).findModuleByName(newModule.getName()) == null) {
+            WriteAction.run(toCommit::commit);
+          }
+        });
       }
     }
     catch (ModuleWithNameAlreadyExists | IOException e) {
-      FlutterUtils.warn(LOG, e);
+      FlutterUtils.warn(LOG, "Failed to add Android module", e, true);
     }
   }
 
@@ -207,11 +240,34 @@ public class FlutterModuleBuilder extends ModuleBuilder {
     return null;
   }
 
+  @Nullable
+  private static VirtualFile findEmbeddedModuleFile(@NotNull VirtualFile baseDir, String flutterModuleName) {
+    baseDir.refresh(false, false);
+    for (String name : asList("android", ".android")) {
+      VirtualFile dir = baseDir.findChild(name);
+      if (dir != null && dir.exists()) {
+        VirtualFile candidate = dir.findChild(flutterModuleName + "_android.iml");
+        if (candidate != null && candidate.exists()) {
+          return candidate;
+        }
+      }
+    }
+    return null;
+  }
+
   @Override
-  public boolean validate(Project current, Project dest) {
+  public boolean validate(@Nullable Project current, @NotNull Project dest) {
     final String settingsValidation = validateSettings(getAdditionalSettings());
     if (settingsValidation != null) {
-      Messages.showErrorDialog(settingsValidation, "Error");
+      OpenApiUtils.safeInvokeLater(() -> {
+        Messages.showErrorDialog(settingsValidation, "Error");
+      });
+      try {
+        Files.deleteIfExists(Path.of(dest.getBasePath()));
+      }
+      catch (IOException e) {
+        // ignore it
+      }
       return false;
     }
 
@@ -237,13 +293,8 @@ public class FlutterModuleBuilder extends ModuleBuilder {
     }
 
     if (FlutterConstants.FLUTTER_PACKAGE_DEPENDENCIES.contains(moduleName)) {
-      throw new ConfigurationException("Invalid module name: '" + moduleName + "' - this will conflict with Flutter package dependencies.");
-    }
-
-    if (moduleName.length() > FlutterConstants.MAX_MODULE_NAME_LENGTH) {
-      throw new ConfigurationException("Invalid module name - must be less than " +
-                                       FlutterConstants.MAX_MODULE_NAME_LENGTH +
-                                       " characters.");
+      throw new ConfigurationException(
+        "Invalid module name: '" + moduleName + "' - this will conflict with Flutter package dependencies.");
     }
 
     return super.validateModuleName(moduleName);
@@ -268,20 +319,18 @@ public class FlutterModuleBuilder extends ModuleBuilder {
     return null;
   }
 
-  @Nullable
   @Override
   public ModuleWizardStep getCustomOptionsStep(final WizardContext context, final Disposable parentDisposable) {
     if (!context.isCreatingNewProject()) {
       myProject = context.getProject();
     }
     myStep = new FlutterModuleWizardStep(context);
-    mySettingsFields = new FlutterCreateAdditionalSettingsFields(new FlutterCreateAdditionalSettings(), this::getFlutterSdk, myProject);
+    mySettingsFields = new FlutterCreateAdditionalSettingsFields(new FlutterCreateAdditionalSettings(), this::getFlutterSdk);
     Disposer.register(parentDisposable, myStep);
     return myStep;
   }
 
   @Override
-  @NotNull
   public String getBuilderId() {
     // The builder id is used to distinguish between different builders with the same module type, see
     // com.intellij.ide.projectWizard.ProjectTypeStep for an example.
@@ -290,7 +339,7 @@ public class FlutterModuleBuilder extends ModuleBuilder {
 
   @Override
   @NotNull
-  public ModuleType getModuleType() {
+  public ModuleType<?> getModuleType() {
     return FlutterModuleUtils.getFlutterModuleType();
   }
 
@@ -310,10 +359,11 @@ public class FlutterModuleBuilder extends ModuleBuilder {
 
     FlutterUtils.disableGradleProjectMigrationNotification(project);
 
+    //noinspection DialogTitleCapitalization
     progress.runProcessWithProgressSynchronously(() -> {
       progress.getProgressIndicator().setIndeterminate(true);
       result.set(sdk.createFiles(baseDir, null, processListener, additionalSettings));
-    }, "Creating Flutter Project", false, project);
+    }, "Creating Flutter project", false, project);
 
     return result.get();
   }
@@ -323,12 +373,23 @@ public class FlutterModuleBuilder extends ModuleBuilder {
     combo.setItem(s);
   }
 
+  public FlutterCreateAdditionalSettingsFields getSettingsField() {
+    return mySettingsFields;
+  }
+
   public class FlutterModuleWizardStep extends ModuleWizardStep implements Disposable {
     private final FlutterGeneratorPeer myPeer;
 
     public FlutterModuleWizardStep(@NotNull WizardContext context) {
       //TODO(pq): find a way to listen to wizard cancelation and propagate to peer.
       myPeer = new FlutterGeneratorPeer(context);
+      if (!FlutterUtils.isAndroidStudio()) {
+        myPeer.getHelpForm().showGettingStarted();
+      }
+    }
+
+    public SettingsHelpForm getHelpForm() {
+      return myPeer.getHelpForm();
     }
 
     @Override
@@ -338,6 +399,7 @@ public class FlutterModuleBuilder extends ModuleBuilder {
 
     @Override
     public void updateDataModel() {
+      mySettingsFields.updateProjectTypes();
     }
 
     @Override
@@ -345,7 +407,6 @@ public class FlutterModuleBuilder extends ModuleBuilder {
       final boolean valid = myPeer.validate();
       if (valid) {
         myPeer.apply();
-        mySettingsFields.update();
       }
       return valid;
     }

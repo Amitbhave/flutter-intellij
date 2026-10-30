@@ -31,10 +31,12 @@ public class StdoutJsonParserTest {
     parser.appendOutput("hello\nnow\n");
     parser.appendOutput("there");
     parser.appendOutput("world");
+    parser.appendOutput("hello\ragain\r");
+    parser.appendOutput("hello\r\nwindows\r\n");
 
     assertArrayEquals(
       "validating parser results",
-      new String[]{"hello\n", "now\n", "there", "world"},
+      new String[]{"hello\n", "now\n", "there", "world", "hello\r", "again\r", "hello\r\n", "windows\r\n"},
       parser.getAvailableLines().toArray()
     );
 
@@ -45,6 +47,24 @@ public class StdoutJsonParserTest {
     assertArrayEquals(
       "validating parser results",
       new String[]{"hello\n", "there"},
+      parser.getAvailableLines().toArray()
+    );
+  }
+
+  @Test
+  public void jsonWithLineBreaks() {
+    final StdoutJsonParser parser = new StdoutJsonParser();
+    parser.appendOutput("[{'foo':'bar'}]");
+    parser.appendOutput("\ntest\n");
+    parser.appendOutput("[{'foo':'baz'}]");
+    parser.appendOutput("\rtest\r");
+    parser.appendOutput("[{'foo':'baz2'}]");
+    parser.appendOutput("\r\nwindows");
+    parser.appendOutput("bye\n");
+
+    assertArrayEquals(
+      "validating parser results",
+      new String[]{"[{'foo':'bar'}]", "test\n", "[{'foo':'baz'}]", "test\r", "[{'foo':'baz2'}]", "windows", "bye\n"},
       parser.getAvailableLines().toArray()
     );
   }
@@ -108,5 +128,20 @@ public class StdoutJsonParserTest {
         "Performing hot restart…"},
       parser.getAvailableLines().toArray()
     );
+  }
+
+  @Test
+  public void testEmptyInput() {
+    StdoutJsonParser parser = new StdoutJsonParser();
+    parser.appendOutput("");
+    assertArrayEquals("empty input", new String[] {}, parser.getAvailableLines().toArray());
+  }
+
+  @Test
+  public void testOnlyNewlines() {
+    StdoutJsonParser parser = new StdoutJsonParser();
+    parser.appendOutput("\n");
+    parser.appendOutput("\r\n");
+    assertArrayEquals("newline input", new String[] { "\n", "\r\n" }, parser.getAvailableLines().toArray());
   }
 }

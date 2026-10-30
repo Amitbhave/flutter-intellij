@@ -27,7 +27,6 @@ public class SdkFieldsTest {
     addOption(elt, "filePath", "lib/main.dart");
     addOption(elt, "additionalArgs", "--trace-startup");
 
-
     final SdkFields fields = new SdkFields();
     XmlSerializer.deserializeInto(fields, elt);
     assertEquals("lib/main.dart", fields.getFilePath());
@@ -63,6 +62,34 @@ public class SdkFieldsTest {
     XmlSerializer.deserializeInto(after, elt);
     assertEquals("main.dart", before.getFilePath());
     assertEquals("--trace-startup", before.getAdditionalArgs());
+  }
+
+  @Test
+  public void supportsSpacesInAdditionalArgs() {
+    final SdkFields sdkFields = new SdkFields();
+    sdkFields.setAdditionalArgs("  --dart-define=\"VALUE=foo bar\"  ");
+    assertArrayEquals(new String[] { "--dart-define=VALUE=foo bar" }, sdkFields.getAdditionalArgsParsed());
+  }
+
+  @Test
+  public void supportsSpacesInAttachArgs() {
+    final SdkFields sdkFields = new SdkFields();
+    sdkFields.setAttachArgs("  --dart-define=\"VALUE=foo bar\"  ");
+    assertArrayEquals(new String[] { "--dart-define=VALUE=foo bar" }, sdkFields.getAttachArgsParsed());
+  }
+
+  @Test
+  public void getAdditionalArgsParsed_edgeCases() {
+    final SdkFields sdkFields = new SdkFields();
+
+    sdkFields.setAdditionalArgs(null);
+    assertEquals(0, sdkFields.getAdditionalArgsParsed().length);
+
+    sdkFields.setAdditionalArgs("   ");
+    assertArrayEquals(new String[0], sdkFields.getAdditionalArgsParsed());
+
+    sdkFields.setAdditionalArgs("  --foo   --bar  ");
+    assertArrayEquals(new String[] { "--foo", "--bar" }, sdkFields.getAdditionalArgsParsed());
   }
 
   private void addOption(Element elt, String name, String value) {

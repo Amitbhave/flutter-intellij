@@ -6,18 +6,19 @@
 package io.flutter.sdk;
 
 import com.google.common.collect.ImmutableSet;
-import com.intellij.openapi.components.ServiceManager;
 import com.intellij.openapi.diagnostic.Logger;
 import com.intellij.openapi.project.Project;
 import com.intellij.util.concurrency.AppExecutorUtil;
 import io.flutter.FlutterUtils;
 import io.flutter.android.AndroidEmulator;
 import io.flutter.android.AndroidSdk;
+import io.flutter.logging.PluginLogger;
 import org.jetbrains.annotations.NotNull;
 
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
+import java.util.Objects;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.atomic.AtomicReference;
 
@@ -26,17 +27,17 @@ import java.util.concurrent.atomic.AtomicReference;
  * as notifying interested parties when the list changes.
  */
 public class AndroidEmulatorManager {
-  private static final Logger LOG = Logger.getInstance(AndroidEmulatorManager.class);
+  private static final @NotNull Logger LOG = PluginLogger.createLogger(AndroidEmulatorManager.class);
 
   @NotNull
   public static AndroidEmulatorManager getInstance(@NotNull Project project) {
-    return ServiceManager.getService(project, AndroidEmulatorManager.class);
+    return Objects.requireNonNull(project.getService(AndroidEmulatorManager.class));
   }
 
   private final @NotNull Project project;
   private final AtomicReference<ImmutableSet<Runnable>> listeners = new AtomicReference<>(ImmutableSet.of());
 
-  private List<AndroidEmulator> cachedEmulators = new ArrayList<>();
+  private @NotNull List<AndroidEmulator> cachedEmulators = new ArrayList<>();
 
   private AndroidEmulatorManager(@NotNull Project project) {
     this.project = project;
@@ -50,9 +51,17 @@ public class AndroidEmulatorManager {
     });
   }
 
+  public void removeListener(@NotNull Runnable callback) {
+    listeners.updateAndGet((old) -> {
+      final List<Runnable> changed = new ArrayList<>(old);
+      changed.remove(callback);
+      return ImmutableSet.copyOf(changed);
+    });
+  }
+
   private CompletableFuture<List<AndroidEmulator>> inProgressRefresh;
 
-  public CompletableFuture<List<AndroidEmulator>> refresh() {
+  public CompletableFuture<@NotNull List<AndroidEmulator>> refresh() {
     // We don't need to refresh if one is in progress.
     synchronized (this) {
       if (inProgressRefresh != null) {
@@ -89,15 +98,15 @@ public class AndroidEmulatorManager {
     return future;
   }
 
-  public List<AndroidEmulator> getCachedEmulators() {
+  public @NotNull List<@NotNull AndroidEmulator> getCachedEmulators() {
     return cachedEmulators;
   }
 
-  private void fireChangeEvent(final List<AndroidEmulator> newEmulators, final List<AndroidEmulator> oldEmulators) {
+  private void fireChangeEvent(final @NotNull List<AndroidEmulator> newEmulators, final List<AndroidEmulator> oldEmulators) {
     if (project.isDisposed()) return;
 
     // Don't fire if the list of devices is unchanged.
-    if (cachedEmulators.equals(newEmulators)) {
+    if (Objects.equals(cachedEmulators, newEmulators)) {
       return;
     }
 

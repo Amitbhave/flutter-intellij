@@ -6,22 +6,26 @@
 package io.flutter.run;
 
 import com.intellij.execution.ExecutionResult;
+import com.intellij.execution.filters.TextConsoleBuilderFactory;
 import com.intellij.execution.runners.ExecutionEnvironment;
+import com.intellij.execution.ui.ExecutionConsole;
 import com.intellij.execution.ui.RunnerLayoutUi;
 import com.intellij.openapi.actionSystem.AnAction;
 import com.intellij.openapi.actionSystem.DefaultActionGroup;
+import com.intellij.openapi.application.ApplicationManager;
 import com.intellij.openapi.diagnostic.Logger;
+import com.intellij.openapi.progress.ProcessCanceledException;
 import com.intellij.openapi.util.Computable;
-import com.intellij.ui.GuiUtils;
 import com.intellij.ui.content.Content;
 import com.intellij.xdebugger.XDebugSession;
+import com.intellij.xdebugger.XDebuggerBundle;
 import com.jetbrains.lang.dart.util.DartUrlResolver;
 import io.flutter.FlutterUtils;
 import io.flutter.actions.ReloadAllFlutterApps;
 import io.flutter.actions.ReloadFlutterApp;
 import io.flutter.actions.RestartAllFlutterApps;
 import io.flutter.actions.RestartFlutterApp;
-import io.flutter.inspector.InspectorService;
+import io.flutter.logging.PluginLogger;
 import io.flutter.run.common.RunMode;
 import io.flutter.run.daemon.FlutterApp;
 import io.flutter.view.FlutterViewMessages;
@@ -30,11 +34,9 @@ import org.dartlang.vm.service.VmService;
 import org.jetbrains.annotations.NotNull;
 import org.jetbrains.annotations.Nullable;
 
-import java.lang.reflect.InvocationTargetException;
 import java.util.Arrays;
 import java.util.List;
 import java.util.Objects;
-import java.util.concurrent.CompletableFuture;
 
 /**
  * A debug process that handles hot reloads for Flutter.
@@ -43,7 +45,7 @@ import java.util.concurrent.CompletableFuture;
  * when not debugging in order to support hot reload.)
  */
 public class FlutterDebugProcess extends DartVmServiceDebugProcess {
-  private static final Logger LOG = Logger.getInstance(FlutterDebugProcess.class);
+  private static final @NotNull Logger LOG = PluginLogger.createLogger(FlutterDebugProcess.class);
 
   private final @NotNull FlutterApp app;
 
@@ -55,20 +57,6 @@ public class FlutterDebugProcess extends DartVmServiceDebugProcess {
                              @NotNull PositionMapper mapper) {
     super(executionEnvironment, session, executionResult, dartUrlResolver, app.getConnector(), mapper);
     this.app = app;
-  }
-
-  @NotNull
-  public FlutterApp getApp() {
-    return app;
-  }
-
-  CompletableFuture<InspectorService> inspectorService;
-
-  public CompletableFuture<InspectorService> getInspectorService() {
-    if (inspectorService == null && getVmConnected() && app.getVmService() != null) {
-      inspectorService = InspectorService.create(app, this, app.getVmService());
-    }
-    return inspectorService;
   }
 
   @Override
@@ -124,7 +112,8 @@ public class FlutterDebugProcess extends DartVmServiceDebugProcess {
     topToolbar.addAction(new ReloadFlutterApp(app, canReload));
     topToolbar.addAction(new RestartFlutterApp(app, canReload));
     topToolbar.addSeparator();
-    topToolbar.addAction(new OpenDevToolsAction(app.getConnector(), debugUrlAvailable));
+    topToolbar.addAction(new OpenDevToolsAction(app, debugUrlAvailable));
+    FlutterDebugProcessActions.addTopToolbarExtensionActions(topToolbar);
 
     settings.addAction(new ReloadAllFlutterApps(app, canReload));
     settings.addAction(new RestartAllFlutterApps(app, canReload));
@@ -134,8 +123,25 @@ public class FlutterDebugProcess extends DartVmServiceDebugProcess {
   @Override
   public void sessionInitialized() {
     if (app.getMode() != RunMode.DEBUG) {
-      suppressDebugViews(getSession().getUI());
+      // Only skip suppressDebugViews if we are in RUN mode (where the tab is headless/hidden)
+      // AND we are using the new named tab hooks.
+      // For other non-debug modes (like PROFILE), the tab is still visible in the Debug window,
+      // so we must suppress the empty debugger panels.
+      final boolean isHeadlessRunMode = app.getMode() == RunMode.RUN && FlutterDebugSessionUtils.USE_NAMED_TAB;
+      if (!isHeadlessRunMode) {
+        suppressDebugViews(getSession().getUI());
+      }
     }
+  }
+
+  @NotNull
+  @Override
+  public ExecutionConsole createConsole() {
+    if (app.getMode() == RunMode.RUN) {
+      return TextConsoleBuilderFactory.getInstance()
+        .createBuilder(getSession().getProject()).getConsole();
+    }
+    return super.createConsole();
   }
 
   /**
@@ -146,13 +152,18 @@ public class FlutterDebugProcess extends DartVmServiceDebugProcess {
       return;
     }
 
+    final String name = XDebuggerBundle.message("debugger.session.tab.console.content.name");
     for (Content c : ui.getContents()) {
-      if (!Objects.equals(c.getTabName(), "Console")) {
+      if (c != null && !Objects.equals(c.getTabName(), name)) {
         try {
-          GuiUtils.runOrInvokeAndWait(() -> ui.removeContent(c, false /* dispose? */));
+          var application = ApplicationManager.getApplication();
+          if (application != null) {
+            application.invokeAndWait(() -> ui.removeContent(c, false /* dispose? */));
+          }
         }
-        catch (InvocationTargetException | InterruptedException e) {
-          FlutterUtils.warn(LOG, e);
+        catch (ProcessCanceledException e) {
+          FlutterUtils.warn(LOG, "ProcessCanceledException in suppressDebugViews", e, true);
+          throw e;
         }
       }
     }

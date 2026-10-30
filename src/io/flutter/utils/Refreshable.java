@@ -8,10 +8,13 @@ package io.flutter.utils;
 import com.google.common.base.Objects;
 import com.google.common.collect.ImmutableSet;
 import com.intellij.openapi.Disposable;
+import com.intellij.openapi.application.Application;
+import com.intellij.openapi.application.ApplicationManager;
 import com.intellij.openapi.diagnostic.Logger;
 import com.intellij.openapi.util.Disposer;
 import com.intellij.util.concurrency.AppExecutorUtil;
 import io.flutter.FlutterUtils;
+import io.flutter.logging.PluginLogger;
 import org.jetbrains.annotations.NotNull;
 import org.jetbrains.annotations.Nullable;
 
@@ -120,7 +123,7 @@ public class Refreshable<T> implements Closeable {
       refreshDone.get();
     }
     catch (Exception e) {
-      FlutterUtils.warn(LOG, "Unexpected exception waiting for refresh task to finish", e);
+      FlutterUtils.warn(LOG, "Unexpected exception waiting for refresh task to finish", e, true);
     }
     return getNow();
   }
@@ -165,7 +168,7 @@ public class Refreshable<T> implements Closeable {
    */
   public void refresh(@NotNull Callback<T> callback) {
     if (publisher.isClosing()) {
-      FlutterUtils.warn(LOG, "attempted to update closed Refreshable");
+      LOG.warn("attempted to update closed Refreshable");
       return;
     }
     schedule.reschedule(new Request<>(this, callback));
@@ -226,7 +229,7 @@ public class Refreshable<T> implements Closeable {
         }
         catch (Exception e) {
           if (!Objects.equal(e.getMessage(), "expected failure in test")) {
-            FlutterUtils.warn(LOG, "Callback threw an exception while updating a Refreshable", e);
+            FlutterUtils.warn(LOG, "Callback threw an exception while updating a Refreshable", e, true);
           }
         }
         finally {
@@ -245,7 +248,7 @@ public class Refreshable<T> implements Closeable {
           });
         }
         catch (Exception e) {
-          FlutterUtils.warn(LOG, "Unable to publish a value while updating a Refreshable", e);
+          FlutterUtils.warn(LOG, "Unable to publish a value while updating a Refreshable", e, true);
         }
       }
     }
@@ -255,7 +258,7 @@ public class Refreshable<T> implements Closeable {
     }
   }
 
-  private static final Logger LOG = Logger.getInstance(Refreshable.class);
+  private static final @NotNull Logger LOG = PluginLogger.createLogger(Refreshable.class);
 
   /**
    * A value indicating whether the Refreshable is being updated or not.
@@ -460,7 +463,7 @@ public class Refreshable<T> implements Closeable {
         wasScheduled = unschedule();
         closing = true;
       }
-      SwingUtilities.invokeLater(() -> {
+      Runnable callback = () -> {
         unpublish(wasScheduled);
 
         final T wasPublished;
@@ -478,7 +481,14 @@ public class Refreshable<T> implements Closeable {
 
         // unblock getWhenReady() if no value was ever published.
         initialized.run();
-      });
+      };
+      Application application = ApplicationManager.getApplication();
+      if (application != null && !application.isUnitTestMode()) {
+        application.invokeAndWait(callback);
+      }
+      else {
+        SwingUtilities.invokeLater(callback);
+      }
       return true;
     }
 
@@ -511,7 +521,7 @@ public class Refreshable<T> implements Closeable {
         unpublishCallback.accept(discarded);
       }
       catch (Exception e) {
-        FlutterUtils.warn(LOG, "An unpublish callback threw an exception while updating a Refreshable", e);
+        FlutterUtils.warn(LOG, "An unpublish callback threw an exception while updating a Refreshable", e, true);
       }
     }
 
@@ -525,7 +535,7 @@ public class Refreshable<T> implements Closeable {
         SwingUtilities.invokeAndWait(() -> doSetState(newState));
       }
       catch (Exception e) {
-        FlutterUtils.warn(LOG, "Unable to change state of Refreshable", e);
+        FlutterUtils.warn(LOG, "Unable to change state of Refreshable", e, true);
       }
     }
 
@@ -543,7 +553,7 @@ public class Refreshable<T> implements Closeable {
         }
         catch (Exception e) {
           if (!Objects.equal(e.getMessage(), "expected failure in test")) {
-            FlutterUtils.warn(LOG, "A subscriber to a Refreshable threw an exception", e);
+            FlutterUtils.warn(LOG, "A subscriber to a Refreshable threw an exception", e, true);
           }
         }
       }
@@ -560,7 +570,7 @@ public class Refreshable<T> implements Closeable {
         initialized.get();
       }
       catch (Exception e) {
-        FlutterUtils.warn(LOG, "Unexpected exception waiting for Refreshable to initialize", e);
+        FlutterUtils.warn(LOG, "Unexpected exception waiting for Refreshable to initialize", e, true);
       }
     }
 

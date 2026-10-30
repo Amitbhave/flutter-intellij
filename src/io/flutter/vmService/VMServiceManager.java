@@ -9,16 +9,11 @@ import com.google.gson.JsonArray;
 import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
 import com.intellij.openapi.Disposable;
-import com.intellij.openapi.diagnostic.Logger;
-import com.intellij.openapi.util.Disposer;
 import com.intellij.openapi.util.text.StringUtil;
-import gnu.trove.THashMap;
-import io.flutter.inspector.EvalOnDartLibrary;
 import io.flutter.run.daemon.FlutterApp;
 import io.flutter.utils.EventStream;
 import io.flutter.utils.StreamSubscription;
 import io.flutter.utils.VmServiceListenerAdapter;
-import io.flutter.vmService.HeapMonitor.HeapListener;
 import org.dartlang.vm.service.VmService;
 import org.dartlang.vm.service.VmServiceListener;
 import org.dartlang.vm.service.consumer.GetIsolateConsumer;
@@ -35,18 +30,14 @@ import java.util.function.Consumer;
 import static io.flutter.vmService.ServiceExtensions.enableOnDeviceInspector;
 
 public class VMServiceManager implements FlutterApp.FlutterAppListener, Disposable {
-  private static final Logger LOG = Logger.getInstance(VMServiceManager.class);
-
   @NotNull private final FlutterApp app;
-  @NotNull private final HeapMonitor heapMonitor;
-  @NotNull private final FlutterFramesMonitor flutterFramesMonitor;
-  @NotNull private final Map<String, EventStream<Boolean>> serviceExtensions = new THashMap<>();
+  @NotNull private final Map<String, EventStream<Boolean>> serviceExtensions = new HashMap<>();
 
   /**
    * Boolean value applicable only for boolean service extensions indicating
    * whether the service extension is enabled or disabled.
    */
-  @NotNull private final Map<String, EventStream<ServiceExtensionState>> serviceExtensionState = new THashMap<>();
+  @NotNull private final Map<String, EventStream<ServiceExtensionState>> serviceExtensionState = new HashMap<>();
 
   private final EventStream<IsolateRef> flutterIsolateRefStream;
 
@@ -61,8 +52,6 @@ public class VMServiceManager implements FlutterApp.FlutterAppListener, Disposab
 
   private final Set<String> registeredServices = new HashSet<>();
 
-  @NotNull public final DisplayRefreshRateManager displayRefreshRateManager;
-
   public VMServiceManager(@NotNull FlutterApp app, @NotNull VmService vmService) {
     this.app = app;
     this.vmService = vmService;
@@ -70,9 +59,6 @@ public class VMServiceManager implements FlutterApp.FlutterAppListener, Disposab
 
     assert (app.getFlutterDebugProcess() != null);
 
-    this.heapMonitor = new HeapMonitor(app.getFlutterDebugProcess().getVmServiceWrapper());
-    this.displayRefreshRateManager = new DisplayRefreshRateManager(this, vmService);
-    this.flutterFramesMonitor = new FlutterFramesMonitor(displayRefreshRateManager, vmService);
     flutterIsolateRefStream = new EventStream<>();
 
     // The VM Service depends on events from the Extension event stream to determine when Flutter.Frame
@@ -87,11 +73,6 @@ public class VMServiceManager implements FlutterApp.FlutterAppListener, Disposab
       @Override
       public void received(String streamId, Event event) {
         onVmServiceReceived(streamId, event);
-      }
-
-      @Override
-      public void connectionClosed() {
-        onVmConnectionClosed();
       }
     };
     vmService.addVmServiceListener(myVmServiceListener);
@@ -122,7 +103,7 @@ public class VMServiceManager implements FlutterApp.FlutterAppListener, Disposab
                   }
                 }
               }
-              addRegisteredExtensionRPCs(isolate, false);
+              addRegisteredExtensionRPCs(isolate);
             }
 
             @Override
@@ -140,59 +121,12 @@ public class VMServiceManager implements FlutterApp.FlutterAppListener, Disposab
     setServiceExtensionState(enableOnDeviceInspector.getExtension(), true, true);
   }
 
-  @NotNull
-  public HeapMonitor getHeapMonitor() {
-    return heapMonitor;
-  }
-
-  public void addRegisteredExtensionRPCs(Isolate isolate, boolean attach) {
-    // If attach was called, there is a risk we may never receive a
-    // Flutter.Frame or Flutter.FirstFrame event so we need to query the
-    // framework to determine if a frame has already been rendered.
-    // This check would be safe to do outside of attach mode but is not needed.
-    if (attach && isolate.getExtensionRPCs() != null && !firstFrameEventReceived) {
-      final Set<String> bindingLibraryNames = new HashSet<>();
-      bindingLibraryNames.add("package:flutter/src/widgets/binding.dart");
-
-      final EvalOnDartLibrary flutterLibrary = new EvalOnDartLibrary(
-        bindingLibraryNames,
-        vmService,
-        this
-      );
-      flutterLibrary.eval("WidgetsBinding.instance.debugDidSendFirstFrameEvent", null, null).whenCompleteAsync((v, e) -> {
-        // If there is an error we assume the first frame has been received.
-        final boolean didSendFirstFrameEvent = e == null ||
-                                               v == null ||
-                                               Objects.equals(v.getValueAsString(), "true");
-        if (didSendFirstFrameEvent) {
-          onFrameEventReceived();
-        }
-        Disposer.dispose(flutterLibrary);
-      });
-    }
+  public void addRegisteredExtensionRPCs(Isolate isolate) {
     if (isolate.getExtensionRPCs() != null) {
       for (String extension : isolate.getExtensionRPCs()) {
         addServiceExtension(extension);
       }
     }
-  }
-
-  /**
-   * Start the Perf service.
-   */
-  private void startHeapMonitor() {
-    // Start polling.
-    heapMonitor.start();
-  }
-
-  /**
-   * Returns a StreamSubscription providing the current Flutter isolate.
-   * <p>
-   * The current value of the subscription can be null occasionally during initial application startup and for a brief time when doing a
-   * hot restart.
-   */
-  public StreamSubscription<IsolateRef> getCurrentFlutterIsolate(Consumer<IsolateRef> onValue, boolean onUIThread) {
-    return flutterIsolateRefStream.listen(onValue, onUIThread);
   }
 
   /**
@@ -208,21 +142,10 @@ public class VMServiceManager implements FlutterApp.FlutterAppListener, Disposab
     }
   }
 
-  /**
-   * Stop the Perf service.
-   */
-  private void stopHeapMonitor() {
-    heapMonitor.stop();
-  }
-
   @Override
   public void dispose() {
-    onVmConnectionClosed();
   }
 
-  private void onVmConnectionClosed() {
-    heapMonitor.stop();
-  }
 
   private void setFlutterIsolate(IsolateRef ref) {
     synchronized (flutterIsolateRefStream) {
@@ -270,12 +193,11 @@ public class VMServiceManager implements FlutterApp.FlutterAppListener, Disposab
           final String name = extensionData.get("extension").getAsString();
           final String valueFromJson = extensionData.get("value").getAsString();
 
-          final ServiceExtensionDescription extension = ServiceExtensions.toggleableExtensionsWhitelist.get(name);
+          final ServiceExtensionDescription extension = ServiceExtensions.toggleableExtensionsAllowList.get(name);
           if (extension != null) {
             final Object value = getExtensionValueFromEventJson(name, valueFromJson);
-            if (extension instanceof ToggleableServiceExtensionDescription) {
-              final ToggleableServiceExtensionDescription toggleableExtension = (ToggleableServiceExtensionDescription)extension;
-              setServiceExtensionState(name, value.equals(toggleableExtension.getEnabledValue()), value);
+            if (extension instanceof ToggleableServiceExtensionDescription toggleableExtension) {
+              setServiceExtensionState(name, Objects.equals(value, toggleableExtension.getEnabledValue()), value);
             }
             else {
               setServiceExtensionState(name, true, value);
@@ -315,10 +237,10 @@ public class VMServiceManager implements FlutterApp.FlutterAppListener, Disposab
 
   private Object getExtensionValueFromEventJson(String name, String valueFromJson) {
     final Class valueClass =
-      ServiceExtensions.toggleableExtensionsWhitelist.get(name).getValueClass();
+      ServiceExtensions.toggleableExtensionsAllowList.get(name).getValueClass();
 
     if (valueClass == Boolean.class) {
-      return valueFromJson.equals("true");
+      return Objects.equals(valueFromJson, "true");
     }
     else if (valueClass == Double.class) {
       return Double.valueOf(valueFromJson);
@@ -352,9 +274,6 @@ public class VMServiceManager implements FlutterApp.FlutterAppListener, Disposab
         addServiceExtension(extensionName);
       }
       pendingServiceExtensions.clear();
-
-      // Query for display refresh rate and add the value to the stream.
-      displayRefreshRateManager.queryRefreshRate();
     }
   }
 
@@ -374,25 +293,25 @@ public class VMServiceManager implements FlutterApp.FlutterAppListener, Disposab
       restoreExtensionFromDevice(name);
 
       // Restore any previously true states by calling their service extensions.
-      if (getServiceExtensionState(name).getValue().isEnabled()) {
+      if (getServiceExtensionState(name).getValue().enabled()) {
         restoreServiceExtensionState(name);
       }
     }
   }
 
   private void restoreExtensionFromDevice(String name) {
-    if (!ServiceExtensions.toggleableExtensionsWhitelist.containsKey(name)) {
+    if (!ServiceExtensions.toggleableExtensionsAllowList.containsKey(name)) {
       return;
     }
     final Class valueClass =
-      ServiceExtensions.toggleableExtensionsWhitelist.get(name).getValueClass();
+      ServiceExtensions.toggleableExtensionsAllowList.get(name).getValueClass();
 
     final CompletableFuture<JsonObject> response = app.callServiceExtension(name);
     response.thenApply(obj -> {
       Object value = null;
       if (obj != null) {
         if (valueClass == Boolean.class) {
-          value = obj.get("enabled").getAsString().equals("true");
+          value = Objects.equals(obj.get("enabled").getAsString(), "true");
           maybeRestoreExtension(name, value);
         }
         else if (valueClass == String.class) {
@@ -409,10 +328,8 @@ public class VMServiceManager implements FlutterApp.FlutterAppListener, Disposab
   }
 
   private void maybeRestoreExtension(String name, Object value) {
-    if (ServiceExtensions.toggleableExtensionsWhitelist.get(name) instanceof ToggleableServiceExtensionDescription) {
-      final ToggleableServiceExtensionDescription extensionDescription =
-        (ToggleableServiceExtensionDescription)ServiceExtensions.toggleableExtensionsWhitelist.get(name);
-      if (value.equals(extensionDescription.getEnabledValue())) {
+    if (ServiceExtensions.toggleableExtensionsAllowList.get(name) instanceof ToggleableServiceExtensionDescription extensionDescription) {
+      if (Objects.equals(value, extensionDescription.getEnabledValue())) {
         setServiceExtensionState(name, true, value);
       }
     }
@@ -429,7 +346,7 @@ public class VMServiceManager implements FlutterApp.FlutterAppListener, Disposab
         return;
       }
 
-      @Nullable final Object value = getServiceExtensionState(name).getValue().getValue();
+      @Nullable final Object value = getServiceExtensionState(name).getValue().value();
 
       if (value instanceof Boolean) {
         app.callBooleanExtension(name, (Boolean)value);
@@ -446,32 +363,6 @@ public class VMServiceManager implements FlutterApp.FlutterAppListener, Disposab
         params.put(name.substring(name.lastIndexOf(".") + 1), value);
         app.callServiceExtension(name, params);
       }
-    }
-  }
-
-  @NotNull
-  public FlutterFramesMonitor getFlutterFramesMonitor() {
-    return flutterFramesMonitor;
-  }
-
-  /**
-   * Add a listener for heap state updates.
-   */
-  public void addHeapListener(@NotNull HeapListener listener) {
-    final boolean hadListeners = heapMonitor.hasListeners();
-    heapMonitor.addListener(listener);
-    if (!hadListeners) {
-      startHeapMonitor();
-    }
-  }
-
-  /**
-   * Remove a heap listener.
-   */
-  public void removeHeapListener(@NotNull HeapListener listener) {
-    heapMonitor.removeListener(listener);
-    if (!heapMonitor.hasListeners()) {
-      stopHeapMonitor();
     }
   }
 
@@ -523,12 +414,6 @@ public class VMServiceManager implements FlutterApp.FlutterAppListener, Disposab
     }
   }
 
-  public void hasServiceExtension(String name, Consumer<Boolean> onData, Disposable parentDisposable) {
-    if (!Disposer.isDisposed(parentDisposable)) {
-      Disposer.register(parentDisposable, hasServiceExtension(name, onData));
-    }
-  }
-
   public boolean hasRegisteredService(String name) {
     return registeredServices.contains(name);
   }
@@ -549,18 +434,18 @@ public class VMServiceManager implements FlutterApp.FlutterAppListener, Disposab
     }
   }
 
-  public CompletableFuture<String> getFlutterViewId() {
+  public CompletableFuture<String> getInspectorViewId() {
     return getFlutterViewsList().exceptionally(exception -> {
       throw new RuntimeException(exception.getMessage());
     }).thenApplyAsync((JsonElement element) -> {
       final JsonArray viewsList = element.getAsJsonObject().get("views").getAsJsonArray();
       for (JsonElement jsonElement : viewsList) {
         final JsonObject view = jsonElement.getAsJsonObject();
-        if (view.get("type").getAsString().equals("FlutterView")) {
+        if (Objects.equals(view.get("type").getAsString(), "InspectorView")) {
           return view.get("id").getAsString();
         }
       }
-      throw new RuntimeException("No Flutter views to query: " + viewsList.toString());
+      throw new RuntimeException("No Flutter views to query: " + viewsList);
     });
   }
 
@@ -590,12 +475,7 @@ public class VMServiceManager implements FlutterApp.FlutterAppListener, Disposab
 
         @Override
         public void received(JsonObject object) {
-          if (object == null) {
-            ret.complete(null);
-          }
-          else {
-            ret.complete(object);
-          }
+          ret.complete(object);
         }
       }
     );

@@ -12,20 +12,24 @@ import com.intellij.notification.NotificationType;
 import com.intellij.notification.Notifications;
 import com.intellij.openapi.actionSystem.AnAction;
 import com.intellij.openapi.actionSystem.AnActionEvent;
+import com.intellij.openapi.application.ApplicationInfo;
 import com.intellij.openapi.fileEditor.FileEditorManager;
 import com.intellij.openapi.fileEditor.FileEditorManagerEvent;
 import com.intellij.openapi.fileEditor.FileEditorManagerListener;
 import com.intellij.openapi.project.Project;
 import com.intellij.openapi.vfs.VirtualFile;
-import com.jetbrains.lang.dart.DartFileType;
+import com.jetbrains.lang.dart.sdk.DartSdk;
 import icons.FlutterIcons;
-import io.flutter.FlutterInitializer;
 import io.flutter.FlutterMessages;
+import io.flutter.FlutterUtils;
 import io.flutter.pub.PubRoot;
+import io.flutter.sdk.FlutterSdk;
+import io.flutter.sdk.FlutterSdkVersion;
 import org.jetbrains.annotations.NotNull;
 
+import java.net.URLEncoder;
+import java.nio.charset.StandardCharsets;
 import java.util.concurrent.Executors;
-import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 
 public class FlutterSurveyNotifications {
@@ -37,12 +41,10 @@ public class FlutterSurveyNotifications {
   private static final String SURVEY_ACTION_TEXT = "Take survey";
   private static final String SURVEY_DISMISSAL_TEXT = "No thanks";
 
-  private static final String ANALYTICS_OPT_IN_DETAILS =
-    "By clicking on this link you agree to share feature usage along with the survey responses.";
-
   interface FlutterSurveyNotifier {
     void prompt();
   }
+
   @NotNull final Project myProject;
 
   FlutterSurveyNotifications(@NotNull Project project) {
@@ -65,7 +67,7 @@ public class FlutterSurveyNotifications {
       }
 
       private void check(@NotNull VirtualFile file) {
-        if (PubRoot.isPubspec(file) || file.getFileType() == DartFileType.INSTANCE) {
+        if (PubRoot.isPubspec(file) || FlutterUtils.isDartFile(file)) {
           new FlutterSurveyNotifications(project).checkForDisplaySurvey();
         }
       }
@@ -82,7 +84,7 @@ public class FlutterSurveyNotifications {
     final PropertiesComponent properties = PropertiesComponent.getInstance();
 
     // Don't prompt more often than every 40 hours.
-    final long lastPromptedMillis = properties.getOrInitLong(FLUTTER_LAST_SURVEY_PROMPT_KEY, 0);
+    final long lastPromptedMillis = properties.getLong(FLUTTER_LAST_SURVEY_PROMPT_KEY, 0);
     if (System.currentTimeMillis() - lastPromptedMillis < PROMPT_INTERVAL_IN_MS) return;
 
     properties.setValue(FLUTTER_LAST_SURVEY_PROMPT_KEY, String.valueOf(System.currentTimeMillis()));
@@ -90,39 +92,40 @@ public class FlutterSurveyNotifications {
     // Or, if the survey has already been taken.
     if (properties.getBoolean(survey.uniqueId)) return;
 
-    final boolean reportAnalytics = FlutterInitializer.getCanReportAnalytics();
-    final String notificationContents = reportAnalytics ?
-                                        ANALYTICS_OPT_IN_DETAILS : null;
-
     final Notification notification = new Notification(
-      FlutterMessages.FLUTTER_NOTIFICATION_GROUP_ID,
-      FlutterIcons.Flutter,
-      survey.title,
-      null,
-      notificationContents,
-      NotificationType.INFORMATION,
-      null
-    );
+      FlutterMessages.FLUTTER_NOTIFICATION_GROUP_ID, survey.title, "", NotificationType.INFORMATION
+    ).setIcon(FlutterIcons.Flutter);
 
-    //noinspection DialogTitleCapitalization
     notification.addAction(new AnAction(SURVEY_ACTION_TEXT) {
       @Override
       public void actionPerformed(@NotNull AnActionEvent event) {
         properties.setValue(survey.uniqueId, true);
         notification.expire();
 
-        String url = survey.urlPrefix + "?Source=IntelliJ";
-        // Add a client ID if analytics have been opted into.
-        if (reportAnalytics) {
-          final String clientId = FlutterInitializer.getAnalytics().getClientId();
-          url += ("&ClientID=" + clientId);
+        final ApplicationInfo applicationInfo = ApplicationInfo.getInstance();
+        String rawIdeName = applicationInfo != null ? applicationInfo.getVersionName() : "IntelliJ - Unknown";
+        if (rawIdeName == null) {
+          rawIdeName = "IntelliJ - Unknown";
+        }
+        final String ideName = URLEncoder.encode(rawIdeName, StandardCharsets.UTF_8);
+        StringBuilder stringBuilder = new StringBuilder(survey.urlPrefix + "?Source=" + ideName);
+
+        final DartSdk dartSdk = DartSdk.getDartSdk(myProject);
+        if (dartSdk != null) {
+          stringBuilder.append("&DartVersion=").append(dartSdk.getVersion());
         }
 
+        final FlutterSdk flutterSdk = FlutterSdk.getFlutterSdk(myProject);
+        final FlutterSdkVersion flutterSdkVersion = flutterSdk == null ? null : flutterSdk.getVersion();
+        if (flutterSdkVersion != null) {
+          stringBuilder.append("&FlutterVersion=").append(flutterSdkVersion.getVersionText());
+        }
+
+        String url = stringBuilder.toString();
         BrowserUtil.browse(url);
       }
     });
 
-    //noinspection DialogTitleCapitalization
     notification.addAction(new AnAction(SURVEY_DISMISSAL_TEXT) {
       @Override
       public void actionPerformed(@NotNull AnActionEvent event) {
@@ -132,12 +135,13 @@ public class FlutterSurveyNotifications {
     });
 
     // Display the prompt after a short delay.
-    final ScheduledExecutorService scheduler = Executors.newSingleThreadScheduledExecutor();
-    scheduler.schedule(() -> {
-      if (!myProject.isDisposed()) {
-        Notifications.Bus.notify(notification, myProject);
-      }
-    }, NOTIFICATION_DELAY_IN_SECS, TimeUnit.SECONDS);
-    scheduler.shutdown();
+    try (var scheduler = Executors.newSingleThreadScheduledExecutor()) {
+      scheduler.schedule(() -> {
+        if (!myProject.isDisposed()) {
+          Notifications.Bus.notify(notification, myProject);
+        }
+      }, NOTIFICATION_DELAY_IN_SECS, TimeUnit.SECONDS);
+      scheduler.shutdown();
+    }
   }
 }

@@ -6,44 +6,36 @@
 package io.flutter.module;
 
 import com.intellij.icons.AllIcons;
-import com.intellij.ide.util.newProjectWizard.AbstractProjectWizard;
 import com.intellij.ide.util.projectWizard.WizardContext;
+import com.intellij.openapi.application.ApplicationManager;
 import com.intellij.openapi.fileChooser.FileChooserDescriptorFactory;
 import com.intellij.openapi.ui.ComboBox;
 import com.intellij.openapi.ui.Messages;
 import com.intellij.openapi.ui.TextComponentAccessor;
 import com.intellij.openapi.ui.ValidationInfo;
-import com.intellij.openapi.util.IconLoader;
 import com.intellij.openapi.util.io.FileUtilRt;
+import com.intellij.openapi.util.text.StringUtil;
 import com.intellij.ui.ComboboxWithBrowseButton;
 import com.intellij.ui.DocumentAdapter;
 import com.intellij.ui.components.JBLabel;
-import com.intellij.ui.components.labels.LinkLabel;
-import com.intellij.util.ui.UIUtil;
 import com.intellij.xml.util.XmlStringUtil;
 import io.flutter.FlutterBundle;
-import io.flutter.actions.InstallSdkAction;
+import io.flutter.module.settings.SettingsHelpForm;
+import io.flutter.sdk.FlutterSdk;
 import io.flutter.sdk.FlutterSdkUtil;
+import org.jetbrains.annotations.NotNull;
+import org.jetbrains.annotations.Nullable;
 
-import java.awt.Cursor;
-import java.awt.Font;
-import java.awt.event.MouseAdapter;
-import java.awt.event.MouseEvent;
 import javax.swing.ComboBoxEditor;
 import javax.swing.JComponent;
 import javax.swing.JLabel;
 import javax.swing.JPanel;
-import javax.swing.JProgressBar;
 import javax.swing.JScrollPane;
 import javax.swing.JTextPane;
 import javax.swing.event.DocumentEvent;
 import javax.swing.text.JTextComponent;
 
-import org.apache.commons.lang.StringUtils;
-import org.jetbrains.annotations.NotNull;
-import org.jetbrains.annotations.Nullable;
-
-public class FlutterGeneratorPeer implements InstallSdkAction.Model {
+public class FlutterGeneratorPeer {
   private final WizardContext myContext;
   private JPanel myMainPanel;
   private ComboboxWithBrowseButton mySdkPathComboWithBrowse;
@@ -51,18 +43,10 @@ public class FlutterGeneratorPeer implements InstallSdkAction.Model {
   private JLabel errorIcon;
   private JTextPane errorText;
   private JScrollPane errorPane;
-  private LinkLabel myInstallActionLink;
-  private JProgressBar myProgressBar;
-  private JTextPane myProgressText;
-  private JScrollPane myProgressScrollPane;
-  private JLabel myCancelProgressButton;
-
-  private final InstallSdkAction myInstallSdkAction;
-  private InstallSdkAction.CancelActionListener myListener;
+  private SettingsHelpForm myHelpForm;
 
   public FlutterGeneratorPeer(WizardContext context) {
     myContext = context;
-    myInstallSdkAction = new InstallSdkAction(this);
 
     errorIcon.setText("");
     errorIcon.setIcon(AllIcons.Actions.Lightning);
@@ -70,9 +54,9 @@ public class FlutterGeneratorPeer implements InstallSdkAction.Model {
 
     // Hide pending real content.
     myVersionContent.setVisible(false);
-    myProgressBar.setVisible(false);
-    myProgressText.setVisible(false);
-    myCancelProgressButton.setVisible(false);
+
+    // TODO(messick) Remove this field.
+    myHelpForm.getComponent().setVisible(false);
 
     init();
   }
@@ -80,10 +64,21 @@ public class FlutterGeneratorPeer implements InstallSdkAction.Model {
   private void init() {
     mySdkPathComboWithBrowse.getComboBox().setEditable(true);
     FlutterSdkUtil.addKnownSDKPathsToCombo(mySdkPathComboWithBrowse.getComboBox());
+    if (mySdkPathComboWithBrowse.getComboBox().getModel().getSize() == 0) {
+      // If no SDKs are found, try to use the one from the FLUTTER_SDK environment variable.
+      // This ensures the SDK path is pre-filled when the combo box is empty, not requiring
+      // a running Application which is the case for users and bots on the initial startup
+      // experience.
+      final String flutterSDKPath = System.getenv("FLUTTER_SDK");
+      if (StringUtil.isNotEmpty(flutterSDKPath)) {
+        mySdkPathComboWithBrowse.getComboBox().setSelectedItem(flutterSDKPath);
+      }
+    }
 
-    mySdkPathComboWithBrowse.addBrowseFolderListener(FlutterBundle.message("flutter.sdk.browse.path.label"), null, null,
-                                                     FileChooserDescriptorFactory.createSingleFolderDescriptor(),
-                                                     TextComponentAccessor.STRING_COMBOBOX_WHOLE_TEXT);
+    mySdkPathComboWithBrowse.addBrowseFolderListener(null, FileChooserDescriptorFactory.createSingleFolderDescriptor()
+      .withTitle(FlutterBundle.message("flutter.sdk.browse.path.label")), TextComponentAccessor.STRING_COMBOBOX_WHOLE_TEXT);
+    mySdkPathComboWithBrowse.getComboBox().addActionListener(e -> fillSdkCache());
+    fillSdkCache();
 
     final JTextComponent editorComponent = (JTextComponent)getSdkEditor().getEditorComponent();
     editorComponent.getDocument().addDocumentListener(new DocumentAdapter() {
@@ -93,30 +88,20 @@ public class FlutterGeneratorPeer implements InstallSdkAction.Model {
       }
     });
 
-    // When this changes the corresponding parts of FlutterProjectStep should also be changed.
-    myInstallActionLink.setIcon(myInstallSdkAction.getLinkIcon());
-    myInstallActionLink.setDisabledIcon(IconLoader.getDisabledIcon(myInstallSdkAction.getLinkIcon()));
-
-    myInstallActionLink.setText(myInstallSdkAction.getLinkText());
-
-    //noinspection unchecked
-    myInstallActionLink.setListener((label, linkUrl) -> myInstallSdkAction.actionPerformed(null), null);
-
-    myProgressText.setFont(UIUtil.getLabelFont(UIUtil.FontSize.NORMAL).deriveFont(Font.ITALIC));
-
-    // Some feedback on hover.
-    myCancelProgressButton.setCursor(Cursor.getPredefinedCursor(Cursor.HAND_CURSOR));
-    myCancelProgressButton.addMouseListener(new MouseAdapter() {
-      @Override
-      public void mouseClicked(MouseEvent e) {
-        myListener.actionCanceled();
-      }
-    });
-
-    myInstallActionLink.setEnabled(getSdkComboPath().trim().isEmpty());
-
     errorIcon.setVisible(false);
     errorPane.setVisible(false);
+  }
+
+  private void fillSdkCache() {
+    ApplicationManager.getApplication().executeOnPooledThread(() -> {
+      String path = (String)mySdkPathComboWithBrowse.getComboBox().getSelectedItem();
+      if (path != null) {
+        FlutterSdk sdk = FlutterSdk.forPath(path);
+        if (sdk != null) {
+          sdk.queryConfiguredPlatforms(false);
+        }
+      }
+    });
   }
 
   @SuppressWarnings("EmptyMethod")
@@ -132,7 +117,7 @@ public class FlutterGeneratorPeer implements InstallSdkAction.Model {
     mySdkPathComboWithBrowse = new ComboboxWithBrowseButton(new ComboBox<>());
   }
 
-  @Override
+  // TODO Link this to actual validation.
   public boolean validate() {
     final ValidationInfo info = validateSdk();
     if (info != null) {
@@ -141,15 +126,13 @@ public class FlutterGeneratorPeer implements InstallSdkAction.Model {
     errorIcon.setVisible(info != null);
     errorPane.setVisible(info != null);
 
-    myInstallActionLink.setEnabled(info != null || getSdkComboPath().trim().isEmpty());
-
     return info == null;
   }
 
   @Nullable
   private ValidationInfo validateSdk() {
     final String sdkPath = getSdkComboPath();
-    if (StringUtils.isEmpty(sdkPath)) {
+    if (StringUtil.isEmpty(sdkPath)) {
       return new ValidationInfo("A Flutter SDK must be specified for project creation.", mySdkPathComboWithBrowse);
     }
     final String message = FlutterSdkUtil.getErrorMessageIfWrongSdkRootPath(sdkPath);
@@ -170,60 +153,7 @@ public class FlutterGeneratorPeer implements InstallSdkAction.Model {
     return mySdkPathComboWithBrowse.getComboBox().getEditor();
   }
 
-  @Override
-  @NotNull
-  public ComboboxWithBrowseButton getSdkComboBox() {
-    return mySdkPathComboWithBrowse;
-  }
-
-  @Override
-  public void setSdkPath(@NotNull String sdkPath) {
-    getSdkEditor().setItem(sdkPath);
-  }
-
-  @Override
-  public JProgressBar getProgressBar() {
-    return myProgressBar;
-  }
-
-  @Override
-  public LinkLabel getInstallActionLink() {
-    return myInstallActionLink;
-  }
-
-  @Override
-  public JTextPane getProgressText() {
-    return myProgressText;
-  }
-
-  @Override
-  public JLabel getCancelProgressButton() {
-    return myCancelProgressButton;
-  }
-
-  /**
-   * Set error details (pass null to hide).
-   */
-  @Override
-  public void setErrorDetails(@Nullable String details) {
-    final boolean makeVisible = details != null;
-    if (makeVisible) {
-      errorText.setText(details);
-    }
-    errorIcon.setVisible(makeVisible);
-    errorPane.setVisible(makeVisible);
-  }
-
-  @Override
-  public void addCancelActionListener(InstallSdkAction.CancelActionListener listener) {
-    myListener = listener;
-  }
-
-  @Override
-  public void requestNextStep() {
-    final AbstractProjectWizard wizard = (AbstractProjectWizard)myContext.getWizard();
-    if (wizard != null) {
-      UIUtil.invokeAndWaitIfNeeded((Runnable)() -> wizard.doNextAction());
-    }
+  public SettingsHelpForm getHelpForm() {
+    return myHelpForm;
   }
 }

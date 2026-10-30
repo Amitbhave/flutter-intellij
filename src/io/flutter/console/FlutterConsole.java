@@ -7,8 +7,7 @@ package io.flutter.console;
 
 import com.intellij.execution.filters.TextConsoleBuilder;
 import com.intellij.execution.filters.TextConsoleBuilderFactory;
-import com.intellij.execution.process.OSProcessHandler;
-import com.intellij.execution.process.ProcessAdapter;
+import com.intellij.execution.process.ColoredProcessHandler;
 import com.intellij.execution.process.ProcessEvent;
 import com.intellij.execution.ui.ConsoleView;
 import com.intellij.execution.ui.ConsoleViewContentType;
@@ -23,6 +22,7 @@ import com.intellij.ui.content.Content;
 import com.intellij.ui.content.ContentFactory;
 import com.intellij.ui.content.ContentManager;
 import com.intellij.ui.content.MessageView;
+import io.flutter.utils.ProcessAdapter;
 import org.jetbrains.annotations.NotNull;
 import org.jetbrains.annotations.Nullable;
 
@@ -47,7 +47,9 @@ class FlutterConsole {
 
   @NotNull
   static FlutterConsole create(@NotNull Project project, @Nullable Module module) {
-    final TextConsoleBuilder builder = TextConsoleBuilderFactory.getInstance().createBuilder(project);
+    var builderFactory = TextConsoleBuilderFactory.getInstance();
+    assert builderFactory != null;
+    final TextConsoleBuilder builder = builderFactory.createBuilder(project);
     builder.setViewer(true);
     if (module != null) {
       builder.addFilter(new FlutterConsoleFilter(module));
@@ -58,7 +60,9 @@ class FlutterConsole {
     panel.setContent(view.getComponent());
 
     final String title = module != null ? "[" + module.getName() + "] Flutter" : "Flutter";
-    final Content content = ContentFactory.SERVICE.getInstance().createContent(panel.getComponent(), title, true);
+    ContentFactory contentFactory = ContentFactory.getInstance();
+    assert contentFactory != null;
+    final Content content = contentFactory.createContent(panel.getComponent(), title, true);
     Disposer.register(content, view);
 
     return new FlutterConsole(view, content, project, module);
@@ -67,7 +71,7 @@ class FlutterConsole {
   /**
    * Starts displaying the output of a different process.
    */
-  void watchProcess(@NotNull OSProcessHandler process) {
+  void watchProcess(@NotNull ColoredProcessHandler process) {
     if (cancelProcessSubscription != null) {
       cancelProcessSubscription.run();
       cancelProcessSubscription = null;
@@ -79,7 +83,7 @@ class FlutterConsole {
     // Print exit code.
     final ProcessAdapter listener = new ProcessAdapter() {
       @Override
-      public void processTerminated(final ProcessEvent event) {
+      public void processTerminated(final @NotNull ProcessEvent event) {
         view.print(
           "Process finished with exit code " + event.getExitCode(),
           ConsoleViewContentType.SYSTEM_OUTPUT);
@@ -94,7 +98,7 @@ class FlutterConsole {
    */
   void bringToFront() {
     // Move the tab to be last and select it.
-    final MessageView messageView = MessageView.SERVICE.getInstance(project);
+    final MessageView messageView = MessageView.getInstance(project);
     final ContentManager contentManager = messageView.getContentManager();
     contentManager.addContent(content);
     contentManager.setSelectedContent(content);

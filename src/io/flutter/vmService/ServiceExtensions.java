@@ -148,14 +148,14 @@ public class ServiceExtensions {
   // These extensions are not toggleable and do not need to be stored as a ToggleableServiceExtensionDescription object.
   public static final String flutterPrefix = "ext.flutter.";
   public static final String inspectorPrefix = "ext.flutter.inspector.";
-  public static final String setPubRootDirectories = "ext.flutter.inspector.setPubRootDirectories";
+  public static final String addPubRootDirectories = "ext.flutter.inspector.addPubRootDirectories";
   public static final String enableLogs = "ext.flutter.logs.enable";
   public static final String loggingChannels = "ext.flutter.logs.loggingChannels";
   public static final String designerRender = "ext.flutter.designer.render";
   public static final String flutterListViews = "_flutter.listViews";
   public static final String displayRefreshRate = "_flutter.getDisplayRefreshRate";
 
-  static final List<ServiceExtensionDescription> toggleableExtensionDescriptions = Arrays.asList(
+  static final List<ServiceExtensionDescription<?>> toggleableExtensionDescriptions = Arrays.asList(
     debugAllowBanner,
     debugPaint,
     debugPaintBaselines,
@@ -171,7 +171,7 @@ public class ServiceExtensions {
     trackRepaintWidgets
   );
 
-  public static final Map<String, ServiceExtensionDescription> toggleableExtensionsWhitelist =
+  public static final Map<String, ServiceExtensionDescription<?>> toggleableExtensionsAllowList =
     toggleableExtensionDescriptions.stream().collect(
       Collectors.toMap(
         ServiceExtensionDescription::getExtension,

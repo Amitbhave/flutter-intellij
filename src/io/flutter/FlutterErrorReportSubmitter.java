@@ -7,13 +7,13 @@ package io.flutter;
 
 import com.intellij.ide.DataManager;
 import com.intellij.ide.plugins.IdeaPluginDescriptor;
-import com.intellij.ide.plugins.PluginManager;
+import com.intellij.ide.plugins.PluginManagerCore;
 import com.intellij.ide.scratch.ScratchRootType;
+import com.intellij.openapi.application.PathManager;
 import com.intellij.openapi.actionSystem.DataContext;
 import com.intellij.openapi.application.ApplicationInfo;
 import com.intellij.openapi.diagnostic.ErrorReportSubmitter;
 import com.intellij.openapi.diagnostic.IdeaLoggingEvent;
-import com.intellij.openapi.diagnostic.Logger;
 import com.intellij.openapi.diagnostic.SubmittedReportInfo;
 import com.intellij.openapi.extensions.PluginId;
 import com.intellij.openapi.fileEditor.OpenFileDescriptor;
@@ -21,16 +21,20 @@ import com.intellij.openapi.fileTypes.PlainTextLanguage;
 import com.intellij.openapi.project.Project;
 import com.intellij.openapi.vfs.VirtualFile;
 import com.intellij.util.Consumer;
+import io.flutter.logging.PluginLogger;
 import io.flutter.run.daemon.DaemonApi;
 import io.flutter.sdk.FlutterSdk;
 import org.jetbrains.annotations.NotNull;
 import org.jetbrains.annotations.Nullable;
 
 import java.awt.*;
+import java.io.File;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.util.List;
 import java.util.concurrent.TimeUnit;
 
 import static com.intellij.openapi.actionSystem.CommonDataKeys.PROJECT;
@@ -41,7 +45,6 @@ import static io.flutter.run.daemon.DaemonApi.COMPLETION_EXCEPTION_PREFIX;
 // Add this line at the top of getPluginByClassName():
 // if (true) return getPlugins()[getPlugins().length-1].getPluginId(); // DEBUG do not merge
 public class FlutterErrorReportSubmitter extends ErrorReportSubmitter {
-  private static final Logger LOG = Logger.getInstance(FlutterErrorReportSubmitter.class);
   private static final String[] KNOWN_ERRORS = new String[]{"Bad state: No element"};
 
   @NotNull
@@ -50,11 +53,11 @@ public class FlutterErrorReportSubmitter extends ErrorReportSubmitter {
     return "Create Flutter Bug Report";
   }
 
-  @Override
-  public boolean submit(@NotNull IdeaLoggingEvent[] events,
+  //@Override
+  public boolean submit(@NotNull IdeaLoggingEvent @NotNull [] events,
                         @Nullable String additionalInfo,
                         @NotNull Component parentComponent,
-                        @NotNull Consumer<SubmittedReportInfo> consumer) {
+                        @NotNull Consumer<? super SubmittedReportInfo> consumer) {
     if (events.length == 0) {
       fail(consumer);
       return false;
@@ -70,23 +73,20 @@ public class FlutterErrorReportSubmitter extends ErrorReportSubmitter {
         if (stackTraceText.startsWith(DaemonApi.FLUTTER_ERROR_PREFIX)) {
           final String message = stackTraceText.substring(DaemonApi.FLUTTER_ERROR_PREFIX.length());
           final int start = message.indexOf(": ") + 2;
-          if (start == 0) continue;
           int end = message.indexOf('\n');
           if (end < 0) end = message.length();
           final String error = message.substring(start, end);
           stackTrace = message.substring(end + 1);
           for (String err : KNOWN_ERRORS) {
             if (error.contains(err)) {
-              if (end != message.length()) {
-                // Dart stack trace included so extract it and set the issue target to the Flutter repo.
-                errorMessage = err;
-                final int endOfDartStack = stackTrace.indexOf("\\n\"\n");
-                if (endOfDartStack > 0) {
-                  // Get only the part between quotes. If the format is wrong just use the whole thing.
-                  stackTrace = stackTrace.substring(1, endOfDartStack);
-                }
-                break;
+              // Dart stack trace included so extract it and set the issue target to the Flutter repo.
+              errorMessage = err;
+              final int endOfDartStack = stackTrace.indexOf("\\n\"\n");
+              if (endOfDartStack > 0) {
+                // Get only the part between quotes. If the format is wrong just use the whole thing.
+                stackTrace = stackTrace.substring(1, endOfDartStack);
               }
+              break;
             }
           }
         }
@@ -127,11 +127,11 @@ public class FlutterErrorReportSubmitter extends ErrorReportSubmitter {
     builder.append(info.getVersionName()).append(" `").append(info.getFullVersion()).append("`");
 
     final PluginId pid = FlutterUtils.getPluginId();
-    final IdeaPluginDescriptor flutterPlugin = PluginManager.getPlugin(pid);
+    final IdeaPluginDescriptor flutterPlugin = PluginManagerCore.getPlugin(pid);
     //noinspection ConstantConditions
     builder.append(" • Flutter plugin `").append(pid.getIdString()).append(' ').append(flutterPlugin.getVersion()).append("`");
 
-    final IdeaPluginDescriptor dartPlugin = PluginManager.getPlugin(PluginId.getId("Dart"));
+    final IdeaPluginDescriptor dartPlugin = PluginManagerCore.getPlugin(PluginId.getId("Dart"));
     if (dartPlugin != null) {
       builder.append(" • Dart plugin `").append(dartPlugin.getVersion()).append("`");
     }
@@ -178,9 +178,28 @@ public class FlutterErrorReportSubmitter extends ErrorReportSubmitter {
       builder.append("\n");
     }
 
-    for (IdeaLoggingEvent event : events) {
-      FlutterInitializer.getAnalytics().sendException(event.getThrowableText(), false);
+    builder.append("## Flutter log\n\n");
+    builder.append("```\n");
+    try {
+      final String logPath = PathManager.getLogPath();
+      final File logFile = new File(logPath, PluginLogger.LOG_FILE_NAME);
+      if (logFile.exists()) {
+        final List<String> lines = Files.readAllLines(logFile.toPath(), StandardCharsets.UTF_8);
+        final int count = 200;
+        final int start = Math.max(0, lines.size() - count);
+        if (start > 0) {
+          builder.append("...\n");
+        }
+        for (int i = start; i < lines.size(); i++) {
+          builder.append(lines.get(i)).append("\n");
+        }
+      } else {
+        builder.append("(flutter.log not found)\n");
+      }
+    } catch (Exception ex) {
+      builder.append("(exception trying to read log: ").append(ex.getMessage()).append(")\n");
     }
+    builder.append("```\n\n");
 
     final String text = builder.toString().trim() + "\n";
 
@@ -219,7 +238,7 @@ public class FlutterErrorReportSubmitter extends ErrorReportSubmitter {
     }
   }
 
-  private static void fail(@NotNull Consumer<SubmittedReportInfo> consumer) {
+  private static void fail(@NotNull Consumer<? super SubmittedReportInfo> consumer) {
     consumer.consume(new SubmittedReportInfo(
       null,
       null,
@@ -227,7 +246,6 @@ public class FlutterErrorReportSubmitter extends ErrorReportSubmitter {
   }
 
   private static byte[] readFully(InputStream in) throws IOException {
-    //noinspection resource
     final ByteArrayOutputStream out = new ByteArrayOutputStream();
     final byte[] temp = new byte[4096];
     int count = in.read(temp);

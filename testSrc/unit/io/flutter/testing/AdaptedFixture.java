@@ -6,6 +6,7 @@
 package io.flutter.testing;
 
 import com.intellij.testFramework.fixtures.IdeaTestFixture;
+import org.jetbrains.annotations.NotNull;
 import org.junit.rules.TestRule;
 import org.junit.runner.Description;
 import org.junit.runners.model.Statement;
@@ -15,7 +16,7 @@ import org.junit.runners.model.Statement;
  *
  * <p>(That is, it can be used with the @Rule annotation.)
  */
-public class AdaptedFixture<T extends IdeaTestFixture> implements TestRule {
+abstract public class AdaptedFixture<T extends IdeaTestFixture> implements TestRule {
   public final Factory<T> factory;
   private final boolean runOnDispatchThread;
   private T inner;
@@ -30,7 +31,7 @@ public class AdaptedFixture<T extends IdeaTestFixture> implements TestRule {
   }
 
   @Override
-  public Statement apply(Statement base, Description description) {
+  public Statement apply(@NotNull Statement base, @NotNull Description description) {
     return new Statement() {
       public void evaluate() throws Throwable {
         inner = factory.create(description.getClassName());

@@ -6,12 +6,9 @@
 package io.flutter.run;
 
 import com.google.common.annotations.VisibleForTesting;
-import com.intellij.openapi.application.ApplicationManager;
 import com.intellij.openapi.diagnostic.Logger;
 import com.intellij.openapi.project.Project;
-import com.intellij.openapi.util.Computable;
 import com.intellij.openapi.util.text.StringUtil;
-import com.intellij.openapi.vfs.LocalFileSystem;
 import com.intellij.openapi.vfs.VirtualFile;
 import com.intellij.psi.PsiFile;
 import com.intellij.psi.search.FilenameIndex;
@@ -19,12 +16,11 @@ import com.intellij.psi.search.GlobalSearchScope;
 import com.intellij.psi.search.GlobalSearchScopesCore;
 import com.intellij.util.PathUtil;
 import com.intellij.xdebugger.XSourcePosition;
-import com.jetbrains.lang.dart.analyzer.DartAnalysisServerService;
 import com.jetbrains.lang.dart.util.DartResolveUtil;
 import com.jetbrains.lang.dart.util.DartUrlResolver;
-import gnu.trove.THashMap;
-import io.flutter.FlutterUtils;
-import io.flutter.dart.DartPlugin;
+import io.flutter.logging.PluginLogger;
+import io.flutter.settings.FlutterSettings;
+import io.flutter.utils.OpenApiUtils;
 import io.flutter.vmService.DartVmServiceDebugProcess;
 import org.dartlang.vm.service.element.LibraryRef;
 import org.dartlang.vm.service.element.Script;
@@ -34,8 +30,10 @@ import org.jetbrains.annotations.Nullable;
 
 import java.io.File;
 import java.util.Collection;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Set;
 
 /**
@@ -44,10 +42,15 @@ import java.util.Set;
  * Used when setting breakpoints, stepping through code, and so on while debugging.
  */
 public class FlutterPositionMapper implements DartVmServiceDebugProcess.PositionMapper {
-  private static final Logger LOG = Logger.getInstance(FlutterPositionMapper.class);
+  private static final @NotNull Logger LOG = PluginLogger.createLogger(FlutterPositionMapper.class);
 
-  @NotNull
-  private final Project project;
+  /**
+   * This Project can't be non-null as we set it to null {@link #shutdown()} so the Project isn't held onto.
+   * <p>
+   * See https://github.com/flutter/flutter-intellij/issues/7380
+   */
+  @Nullable
+  private Project project;
 
   /**
    * The directory containing the Flutter application's source code.
@@ -59,12 +62,6 @@ public class FlutterPositionMapper implements DartVmServiceDebugProcess.Position
 
   @NotNull
   private final DartUrlResolver resolver;
-
-  /**
-   * Used to ask the Dart analysis server to convert between Dart URI's and local absolute paths.
-   */
-  @Nullable
-  private final Analyzer analyzer;
 
   /**
    * Callback to download a Dart file from Observatory.
@@ -94,22 +91,20 @@ public class FlutterPositionMapper implements DartVmServiceDebugProcess.Position
   /**
    * A cache containing each file version downloaded from Observatory. The key is an isolate id.
    */
-  private final Map<String, ObservatoryFile.Cache> fileCache = new THashMap<>();
+  private final Map<String, ObservatoryFile.Cache> fileCache = new HashMap<>();
 
   public FlutterPositionMapper(@NotNull Project project,
                                @NotNull VirtualFile sourceRoot,
-                               @NotNull DartUrlResolver resolver,
-                               @Nullable Analyzer analyzer) {
-
+                               @NotNull DartUrlResolver resolver) {
     this.project = project;
     this.sourceRoot = sourceRoot;
     this.resolver = resolver;
-    this.analyzer = analyzer;
   }
 
   @NotNull
   public Project getProject() {
-    return project;
+    // Project may be null after shutdown but clients have no business accessing it after that so it's reasonable to fail here.
+    return Objects.requireNonNull(project);
   }
 
   public void onConnect(@NotNull DartVmServiceDebugProcess.ScriptProvider provider, @Nullable String remoteBaseUri) {
@@ -134,7 +129,15 @@ public class FlutterPositionMapper implements DartVmServiceDebugProcess.Position
       if (remoteUri.startsWith(DartUrlResolver.DART_PREFIX)) continue;
       if (remoteUri.startsWith(DartUrlResolver.PACKAGE_PREFIX)) continue;
       remoteSourceRoot = findRemoteSourceRoot(remoteUri);
-      if (remoteSourceRoot != null) return;
+      if (remoteSourceRoot != null) {
+        if (FlutterSettings.getInstance().isFilePathLoggingEnabled()) {
+          LOG.info("Calculated remoteSourceRoot: " + remoteSourceRoot + " from " + remoteUri);
+        }
+        return;
+      }
+    }
+    if (FlutterSettings.getInstance().isFilePathLoggingEnabled()) {
+      LOG.info("Could not calculate remoteSourceRoot");
     }
   }
 
@@ -146,8 +149,10 @@ public class FlutterPositionMapper implements DartVmServiceDebugProcess.Position
    * Returns null if there isn't a unique result.
    */
   private String findRemoteSourceRoot(String remotePath) {
+    if (project == null || project.isDisposed()) return null;
+
     // Find files with the same filename (matching the suffix after the last slash).
-    final PsiFile[] localFilesWithSameName = ApplicationManager.getApplication().runReadAction((Computable<PsiFile[]>)() -> {
+    final PsiFile[] localFilesWithSameName = OpenApiUtils.safeRunReadAction(() -> {
       final String remoteFileName = PathUtil.getFileName(remotePath);
       final GlobalSearchScope scope = GlobalSearchScopesCore.directoryScope(project, sourceRoot, true);
       return FilenameIndex.getFilesByName(project, remoteFileName, scope);
@@ -181,6 +186,9 @@ public class FlutterPositionMapper implements DartVmServiceDebugProcess.Position
   public Collection<String> getBreakpointUris(@NotNull final VirtualFile file) {
     final Set<String> results = new HashSet<>();
     final String uriByIde = resolver.getDartUrlForFile(file);
+    if (FlutterSettings.getInstance().isFilePathLoggingEnabled()) {
+      LOG.info("getBreakpointUris: uriByIde=" + uriByIde + " for file=" + file.getPath());
+    }
 
     // If dart:, short circuit the results.
     if (uriByIde.startsWith(DartUrlResolver.DART_PREFIX)) {
@@ -195,14 +203,6 @@ public class FlutterPositionMapper implements DartVmServiceDebugProcess.Position
     else {
       results.add(uriByIde);
       results.add(threeSlashize(new File(file.getPath()).toURI().toString()));
-    }
-
-    // package: (if applicable)
-    if (analyzer != null) {
-      final String uriByServer = analyzer.getUri(file.getPath());
-      if (uriByServer != null) {
-        results.add(uriByServer);
-      }
     }
 
     final String path = file.getPath();
@@ -220,6 +220,9 @@ public class FlutterPositionMapper implements DartVmServiceDebugProcess.Position
       }
     }
 
+    if (FlutterSettings.getInstance().isFilePathLoggingEnabled()) {
+      LOG.info("getBreakpointUris for " + file.getPath() + ": " + results);
+    }
     return results;
   }
 
@@ -227,7 +230,9 @@ public class FlutterPositionMapper implements DartVmServiceDebugProcess.Position
    * Returns the local position (to display to the user) corresponding to a token position in Observatory.
    */
   @Nullable
-  public XSourcePosition getSourcePosition(@NotNull final String isolateId, @NotNull final ScriptRef scriptRef, int tokenPos) {
+  public XSourcePosition getSourcePosition(@NotNull final String isolateId,
+                                           @NotNull final ScriptRef scriptRef,
+                                           int tokenPos) {
     return getSourcePosition(isolateId, scriptRef.getId(), scriptRef.getUri(), tokenPos);
   }
 
@@ -246,7 +251,7 @@ public class FlutterPositionMapper implements DartVmServiceDebugProcess.Position
   private XSourcePosition getSourcePosition(@NotNull final String isolateId, @NotNull final String scriptId,
                                             @NotNull final String scriptUri, int tokenPos) {
     if (scriptProvider == null) {
-      FlutterUtils.warn(LOG, "attempted to get source position before connected to observatory");
+      LOG.warn("attempted to get source position before connected to observatory");
       return null;
     }
 
@@ -271,59 +276,39 @@ public class FlutterPositionMapper implements DartVmServiceDebugProcess.Position
    * Attempt to find a local Dart file corresponding to a script in Observatory.
    */
   @Nullable
-  private VirtualFile findLocalFile(@NotNull ScriptRef scriptRef) {
-    return findLocalFile(scriptRef.getUri());
-  }
-
-  /**
-   * Attempt to find a local Dart file corresponding to a script in Observatory.
-   */
-  @Nullable
-  private VirtualFile findLocalFile(@NotNull Script script) {
-    return findLocalFile(script.getUri());
-  }
-
-  /**
-   * Attempt to find a local Dart file corresponding to a script in Observatory.
-   */
-  @Nullable
   protected VirtualFile findLocalFile(@NotNull String uri) {
-    return ApplicationManager.getApplication().runReadAction((Computable<VirtualFile>)() -> {
+    final VirtualFile file = OpenApiUtils.safeRunReadAction(() -> {
       // This can be a remote file or URI.
-      final String remote = uri;
-
-      if (remoteSourceRoot != null && remote.startsWith(remoteSourceRoot)) {
+      if (remoteSourceRoot != null && uri.startsWith(remoteSourceRoot)) {
         final String rootUri = StringUtil.trimEnd(resolver.getDartUrlForFile(sourceRoot), '/');
-        final String suffix = remote.substring(remoteSourceRoot.length());
+        final String suffix = uri.substring(remoteSourceRoot.length());
         return resolver.findFileByDartUrl(rootUri + suffix);
       }
 
-      if (remoteBaseUri != null && remote.startsWith(remoteBaseUri)) {
+      if (remoteBaseUri != null && uri.startsWith(remoteBaseUri)) {
         final String rootUri = StringUtil.trimEnd(resolver.getDartUrlForFile(sourceRoot), '/');
-        final String suffix = remote.substring(remoteBaseUri.length());
+        final String suffix = uri.substring(remoteBaseUri.length());
         return resolver.findFileByDartUrl(rootUri + suffix);
       }
 
       final String remoteUri;
-      if (remote.startsWith("/")) {
+      if (uri.startsWith("/")) {
         // Convert a file path to a file: uri.
-        remoteUri = new File(remote).toURI().toString();
+        remoteUri = new File(uri).toURI().toString();
       }
       else {
-        remoteUri = remote;
-      }
-
-      // See if the analysis server can resolve the URI.
-      if (analyzer != null && !isDartPatchUri(remoteUri)) {
-        final String path = analyzer.getAbsolutePath(remoteUri);
-        if (path != null) {
-          return LocalFileSystem.getInstance().findFileByPath(path);
-        }
+        remoteUri = uri;
       }
 
       // Otherwise, assume no mapping is needed and see if we can resolve it locally.
       return resolver.findFileByDartUrl(remoteUri);
     });
+    if (file == null) {
+      if (FlutterSettings.getInstance().isFilePathLoggingEnabled()) {
+        LOG.info("findLocalFile: could not find local file for " + uri);
+      }
+    }
+    return file;
   }
 
   @NotNull
@@ -336,69 +321,7 @@ public class FlutterPositionMapper implements DartVmServiceDebugProcess.Position
     return uri;
   }
 
-  private static boolean isDartPatchUri(@NotNull final String uri) {
-    // dart:_builtin or dart:core-patch/core_patch.dart
-    return uri.startsWith("dart:_") || uri.startsWith("dart:") && uri.contains("-patch/");
-  }
-
   public void shutdown() {
-    if (analyzer != null) {
-      analyzer.close();
-    }
-  }
-
-  /**
-   * Wraps a Dart analysis server and execution id for doing URI resolution for a particular Flutter app.
-   * <p>
-   * (Can be mocked out for unit tests.)
-   */
-  public interface Analyzer {
-    @Nullable
-    String getAbsolutePath(@NotNull String dartUri);
-
-    @Nullable
-    String getUri(@NotNull String absolutePath);
-
-    void close();
-
-    /**
-     * Sets up the analysis server to resolve URI's for a Flutter app, if possible.
-     *
-     * @param sourceLocation the file containing the app's main() method, or a directory containing it.
-     */
-    @Nullable
-    static Analyzer create(@NotNull Project project, @NotNull VirtualFile sourceLocation) {
-      final DartAnalysisServerService service = DartPlugin.getInstance().getAnalysisService(project);
-      if (!service.serverReadyForRequest()) {
-        // TODO(skybrian) make this required to debug at all? It seems bad for breakpoints to be flaky.
-        FlutterUtils.warn(LOG, "Dart analysis server is not running. Some breakpoints may not work.");
-        return null;
-      }
-
-      final String contextId = service.execution_createContext(sourceLocation.getPath());
-      if (contextId == null) {
-        FlutterUtils.warn(LOG, "Failed to get execution context from analysis server. Some breakpoints may not work.");
-        return null;
-      }
-
-      return new Analyzer() {
-        @Override
-        @Nullable
-        public String getAbsolutePath(@NotNull String dartUri) {
-          return service.execution_mapUri(contextId, null, dartUri);
-        }
-
-        @Override
-        @Nullable
-        public String getUri(@NotNull String absolutePath) {
-          return service.execution_mapUri(contextId, absolutePath, null);
-        }
-
-        @Override
-        public void close() {
-          service.execution_deleteContext(contextId);
-        }
-      };
-    }
+    project = null;
   }
 }

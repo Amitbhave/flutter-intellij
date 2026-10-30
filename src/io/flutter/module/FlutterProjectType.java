@@ -8,18 +8,23 @@ package io.flutter.module;
 import io.flutter.FlutterBundle;
 
 public enum FlutterProjectType {
-  APP(FlutterBundle.message("flutter.module.create.settings.type.application"), "app"),
-  PLUGIN(FlutterBundle.message("flutter.module.create.settings.type.plugin"), "plugin"),
-  PACKAGE(FlutterBundle.message("flutter.module.create.settings.type.package"), "package"),
-  MODULE(FlutterBundle.message("flutter.module.create.settings.type.module"), "module"),
-  IMPORT(FlutterBundle.message("flutter.module.create.settings.type.import_module"), "module");
+  APP(FlutterBundle.message("flutter.module.create.settings.type.application"), "app", true),
+  PLUGIN(FlutterBundle.message("flutter.module.create.settings.type.plugin"), "plugin", true),
+  PACKAGE(FlutterBundle.message("flutter.module.create.settings.type.package"), "package", false),
+  MODULE(FlutterBundle.message("flutter.module.create.settings.type.module"), "module", false),
+  SKELETON("Skeleton", "skeleton", true),
+  PLUGIN_FFI("FFI Plugin", "plugin_ffi", true),
+  EMPTY_PROJECT("Empty Project", "--empty", true),
+  IMPORT(FlutterBundle.message("flutter.module.create.settings.type.import_module"), "module", false);
 
   final public String title;
   final public String arg;
+  final public boolean requiresPlatform;
 
-  FlutterProjectType(String title, String arg) {
+  FlutterProjectType(String title, String arg, boolean requiresPlatform) {
     this.title = title;
     this.arg = arg;
+    this.requiresPlatform = requiresPlatform;
   }
 
   public String toString() {

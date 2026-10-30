@@ -36,7 +36,8 @@ public class FlutterTestEventsConverter extends DartTestEventsConverterZ {
    * widget test wrapper.
    */
   private static boolean isSyntheticWidgetTestGroup(@Nullable Item item) {
-    return item instanceof Group && Objects.equals(item.getUrl(), "package:flutter_test/src/widget_tester.dart") &&
+    return item instanceof Group &&
+           Objects.equals(item.getUrl(), "package:flutter_test/src/widget_tester.dart") &&
            isSyntheticWidgetGroupName(item.getName());
   }
 
@@ -46,16 +47,17 @@ public class FlutterTestEventsConverter extends DartTestEventsConverterZ {
 
   @Nullable
   private static JsonElement getValue(@NotNull JsonElement element, @NotNull String member) {
-    if (!(element instanceof JsonObject)) return null;
+    if (!(element instanceof JsonObject object)) return null;
 
-    final JsonObject object = (JsonObject)element;
     return object.has(member) ? object.get(member) : null;
   }
 
   @Override
   protected boolean process(@NotNull JsonArray array) {
-    // Consume (and don't print) observatoryUri output, e.g.,
-    //     [{"event":"test.startedProcess","params":{"observatoryUri":"http://127.0.0.1:51770/"}}]
+    // Consume (and don't print) observatoryUri/vmServiceUri output, e.g.,
+    //     [{"event":"test.startedProcess","params":{"vmServiceUri":"http://127.0.0.1:62047/VFPfi0PrluM=/"}}]
+    //     [{"event":"test.startedProcess","params":{"observatoryUri":"http://127.0.0.1:51770/"}}] (deprecated)
+    // Both fields may be present on Flutter versions older than 3.34.
     if (array.size() == 1) {
       final JsonElement element = array.get(0);
       final JsonElement event = getValue(element, "event");
@@ -63,8 +65,8 @@ public class FlutterTestEventsConverter extends DartTestEventsConverterZ {
         if (Objects.equals(event.getAsString(), "test.startedProcess")) {
           final JsonElement params = getValue(element, "params");
           if (params != null) {
-            final JsonElement uri = getValue(params, "observatoryUri");
-            if (uri != null) return true;
+            return getValue(params, "vmServiceUri") != null
+                || getValue(params, "observatoryUri") != null;
           }
         }
       }
